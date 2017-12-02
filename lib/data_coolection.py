@@ -178,13 +178,13 @@ class Manta_cam(Cool_device):
         Overload write to file function. Needed here in order to reshape
         the image from array to vector.
         """
-        super().write(h5f)
         raw = epics.caget(self.arraydata)
         raw = raw.reshape(epics.caget(self.port + ':det1:SizeY_RBV'),
                           epics.caget(self.port + ':det1:SizeX_RBV'))
-        group = h5f.get(self.pathname)
+        group = h5f.require_group(self.pathname)
         ds = group.create_dataset('data', data=raw)
         ds.attrs['pvname'] = self.arraydata
+        super().write(h5f)
 
 
 class Thorlabs_spectrometer(Cool_device):
@@ -239,18 +239,23 @@ class RNG(Cool_device):
     Print some random numbers to HDF5 as an example of a non epics device
     """
     dev_type = 'rng'
+    datavec = None
 
-    def sw_trigger(self): pass
+    def populate(self):
+        self.datavec = numpy.random.rand(100)
+        self.is_ready = True
+
+    def sw_trigger(self):
+        if(not self.is_ready):
+            threading.Thread(target=self.populate, args=()).start()
 
     def __init__(self, port, SWTrig=False):
         self.port = port
         self.pathname = 'data/rng/' + self.port + '/'
 
-    def is_ready_p(self): return(random.random() > 0.1)
-
     def write(self, h5f):
-        super().write(h5f)
         group = h5f.require_group(self.pathname)
         group.attrs['length'] = 100
         group.attrs['Ignore'] = 'Please'
-        group.create_dataset('y_values', data=numpy.random.rand(100))
+        group.create_dataset('y_values', data=self.datavec)
+        super().write(h5f)
