@@ -102,11 +102,16 @@ class Cool_device(object):
     x_values = None
     y_values = None
     y_scale = None
+    potentially_desynced = False
 
     meta_pvnames = []
     connected_pvs = []
 
-    def set_ready(self): self.is_ready = True
+    def set_ready(self):
+        if(self.is_ready):
+            warnings.warn("New trigger before readout finished! potentially desynced event!")
+            self.potentially_desynced = True
+        self.is_ready = True
 
     def sw_trigger(): pass
 
@@ -125,7 +130,9 @@ class Cool_device(object):
         self.write_ds_maybe(group, 'x_values', self.x_values)
         self.write_ds_maybe(group, 'y_values', self.y_values)
         self.write_ds_maybe(group, 'y_scale', self.y_scale)
+        group.attrs['Potentially desynced'] = self.potentially_desynced
         self.is_ready = False
+        self.potentially_desynced = False
 
     def disconnect(self):
         for pv in self.connected_pvs:
