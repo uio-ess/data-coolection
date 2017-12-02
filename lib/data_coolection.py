@@ -2,6 +2,9 @@ import epics
 import h5py
 import threading
 import time
+import random
+import numpy
+import warnings
 
 
 def hush():
@@ -95,8 +98,12 @@ class Cool_device(object):
     pathname = None
     dev_type = None
     is_ready = False
+    data = None
+    x_values = None
+    y_values = None
+    y_scale = None
+
     meta_pvnames = []
-    ds_pvnames = []
     connected_pvs = []
 
     def set_ready(self): self.is_ready = True
@@ -105,13 +112,19 @@ class Cool_device(object):
 
     def is_ready_p(self): return(self.is_ready)
 
+    def write_ds_maybe(self, group, dsname, pvname):
+        if(pvname):
+            ds = group.create_dataset(dsname, data=epics.caget(pvname))
+            ds.attrs['pvname'] = pvname
+
     def write(self, h5f):
         group = h5f.require_group(self.pathname)
         group.attrs['instrument_name'] = self.dev_type
         for pvname in self.meta_pvnames:
             group.attrs[pvname] = epics.caget(pvname)
-        for pvname in self.ds_pvnames:
-            group.create_dataset(pvname, data=epics.caget(pvname))
+        self.write_ds_maybe(group, 'x_values', self.x_values)
+        self.write_ds_maybe(group, 'y_values', self.y_values)
+        self.write_ds_maybe(group, 'y_scale', self.y_scale)
         self.is_ready = False
 
     def disconnect(self):
@@ -135,40 +148,43 @@ class Manta_cam(Cool_device):
         self.pathname = 'data/images/' + port + '/'
         self.arraydata = port + ':image1:ArrayData'
         # PVs that will be dumped to file
-        self.meta_pvnames[:] = [self.port + pvn for pvn in [':det1:SizeX_RBV',
-                                                            ':det1:SizeY_RBV',
-                                                            ':det1:Manufacturer_RBV',
-                                                            ':det1:Model_RBV',
-                                                            ':det1:AcquireTime_RBV',
-                                                            ':det1:Gain_RBV',
-                                                            ':det1:LEFTSHIFT_RBV',
-                                                            ':det1:DataType_RBV']]
+        self.meta_pvnames = [self.port + pvn for pvn in [':det1:SizeX_RBV',
+                                                         ':det1:SizeY_RBV',
+                                                         ':det1:Manufacturer_RBV',
+                                                         ':det1:Model_RBV',
+                                                         ':det1:AcquireTime_RBV',
+                                                         ':det1:Gain_RBV',
+                                                         ':det1:LEFTSHIFT_RBV',
+                                                         ':det1:DataType_RBV']]
         # Set is_ready to True when there is new data
         pv = epics.PV(self.port + ':image1:ArrayData',
                       auto_monitor=True,
                       callback=lambda pvn=None, v=None, cv=None, **fw: self.set_ready())
         self.connected_pvs.append(pv)
+        for pvname, value in {':image1:EnableCallbacks': 1,  # Enable
+                              ':image1:ArrayCallbacks': 1,  # Enable
+                              ':det1:DataType': 1,  # UInt16, 12-bit
+                              ':det1:LEFTSHIFT': 0}.items():  # Disable
+            epics.caput(port + pvname, value)
+
         if(SWTrig):
-            for pvname, value in {':image1:EnableCallbacks': 1,  # Enable
-                                  ':image1:ArrayCallbacks': 1,  # Enable
-                                  ':det1:ImageMode': 0,  # Get a single image
-                                  ':det1:DataType': 1,  # UInt16, 12-bit
-                                  ':det1:LEFTSHIFT': 0}.items():  # Disable
-                epics.caput(port + pvname, value)
+            epics.caput(port + ':det1:ImageMode', 0)  # Get a single image
         else:
-            raise Exception('Not yet implemented')
+            epics.caput(port + ':det1:ImageMode', 1)  # Get images continously
+            warnings.warn('Not yet implemented, missing external trigger setting')
 
     def write(self, h5f):
         """
         Overload write to file function. Needed here in order to reshape
         the image from array to vector.
         """
-        super(Manta_cam, self).write(h5f)
+        super().write(h5f)
         raw = epics.caget(self.arraydata)
         raw = raw.reshape(epics.caget(self.port + ':det1:SizeY_RBV'),
                           epics.caget(self.port + ':det1:SizeX_RBV'))
         group = h5f.get(self.pathname)
-        group.create_dataset(self.arraydata, data=raw)
+        ds = group.create_dataset('data', data=raw)
+        ds.attrs['pvname'] = self.arraydata
 
 
 class Thorlabs_spectrometer(Cool_device):
@@ -187,27 +203,54 @@ class Thorlabs_spectrometer(Cool_device):
         self.pathname = 'data/spectra/' + port + '/'
         self.arraydata = port + ':trace1:ArrayData'
         # PVs that will be dumped to file
-        self.meta_pvnames[:] = [self.port + pvn for pvn in [':det1:AcquireTime_RBV',
-                                                            ':det1:Manufacturer_RBV',
-                                                            ':det1:Model_RBV']]
-        self.ds_pvnames = [port + pvn for pvn in [':trace1:ArrayData',
-                                                  ':det1:TlAmplitudeData_RBV',
-                                                  ':det1:TlWavelengthData_RBV']]
+        self.meta_pvnames = [self.port + pvn for pvn in [':det1:AcquireTime_RBV',
+                                                         ':det1:Manufacturer_RBV',
+                                                         ':det1:Model_RBV']]
+        self.y_values = port + ':trace1:ArrayData'
+        self.x_values = port + ':det1:TlWavelengthData_RBV'
+        self.y_scale = port + ':det1:TlAmplitudeData_RBV'
+
         # Set is_ready to True when there is new data
         pv = epics.PV(self.port + ':trace1:ArrayData',
                       auto_monitor=True,
                       callback=lambda pvn=None, v=None, cv=None, **fw: self.set_ready())
         self.connected_pvs.append(pv)
+        for pvname, value in {':det1:TlAcquisitionType': 0,  # 1 is processed, set to 0 for raw
+                              ':trace1:EnableCallbacks': 1,  # Enable
+                              ':trace1:ArrayCallbacks': 1,  # Enable
+                              ':det1:TlAmplitudeDataTarget': 2,  # Thorlabs
+                              ':det1:TlWavelengthDataTarget': 0,  # Factory
+                              ':det1:TlAmplitudeDataGet': 1,  # Get amplitudes
+                              ':det1:TlWavelengthDataGet': 1}.items():  # Get waves
+            epics.caput(port + pvname, value)
         if(SWTrig):
             for pvname, value in {':det1:ImageMode': 0,  # Single
-                                  ':det1:TlAcquisitionType': 0,  # 1 is processed, set to 0 for raw
-                                  ':det1:TriggerMode': 0,  # Internal
-                                  ':trace1:EnableCallbacks': 1,  # Enable
-                                  ':trace1:ArrayCallbacks': 1,  # Enable
-                                  ':det1:TlAmplitudeDataTarget': 2,  # Thorlabs
-                                  ':det1:TlWavelengthDataTarget': 0,
-                                  ':det1:TlAmplitudeDataGet': 1,
-                                  ':det1:TlWavelengthDataGet': 1}.items():  # Factory
+                                  ':det1:TriggerMode': 0}.items():  # Internal
                 epics.caput(port + pvname, value)
         else:
-            raise Exception('Not yet implemented')
+            for pvname, value in {':det1:ImageMode': 1,  # Continuous
+                                  ':det1:TriggerMode': 1}.items():  # External
+                epics.caput(port + pvname, value)
+                warnings.warn('Not yet implemented')
+
+
+class RNG(Cool_device):
+    """
+    Print some random numbers to HDF5 as an example of a non epics device
+    """
+    dev_type = 'rng'
+
+    def sw_trigger(self): pass
+
+    def __init__(self, port, SWTrig=False):
+        self.port = port
+        self.pathname = 'data/rng/' + self.port + '/'
+
+    def is_ready_p(self): return(random.random() > 0.1)
+
+    def write(self, h5f):
+        super().write(h5f)
+        group = h5f.require_group(self.pathname)
+        group.attrs['length'] = 100
+        group.attrs['Ignore'] = 'Please'
+        group.create_dataset('y_values', data=numpy.random.rand(100))
