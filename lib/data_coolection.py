@@ -2,8 +2,8 @@ import epics
 import h5py
 import threading
 import time
-import random
 import numpy
+import scipy.ndimage
 import warnings
 
 
@@ -19,28 +19,57 @@ class Coolector(object):
     """
     Collect data from Cool devices, put them in HDF5 files
     """
+    pause = 0.001
     triggerID = 0
-    __devices = []
-    __listen = False
+    _devices = []
+    _listen = False
     thread = None
 
-    def __listening(self):
+    def check_if_ready(self):
+        """
+        Are all devices ready for readi out?
+        """
+        ready = True
+        for dev in self._devices:
+            if(not dev.is_ready_p()):
+                ready = False
+        return(ready)
+
+    def wait_for_data(self):
+        """
+        Wait until all devices are ready, then read the all out
+        """
+        while(True):
+            if(self.check_if_ready()):
+                break
+            time.sleep(self.pause)
+        self.write(self.triggerID)
+
+    def _listening(self):
+        """
+        Take data whenever all devices are ready for read out
+        """
         print('Listening!')
-        while(self.__listen):
-            ready = True
-            for dev in self.__devices:
-                if(not dev.is_ready_p()):
-                    ready = False
-            if(ready):
-                self.triggerID += 1
+        while(self._listen):
+            if(self.check_if_ready()):
                 self.write(self.triggerID)
+            time.sleep(self.pause)
         print('Shutting down collection!')
 
     def sw_trigger(self):
-        for dev in self.__devices:
+        """
+        Send SW trigger to all connected devices
+        """
+        for dev in self._devices:
             dev.sw_trigger()
 
     def write(self, trigger):
+        """
+        Write meta data + device data for all connected devices
+        """
+        # This is the accepted trigger count, there should be a way of getting
+        # global trigger ID
+        self.triggerID += 1
         timestamp = time.time()
         fname = '{0}{1:016d}-{2}.h5'.format(self.directory, trigger, self.sample)
         print('Writing to ' + fname)
@@ -50,11 +79,14 @@ class Coolector(object):
             attrs['trigger_id'] = trigger
             for attr, value in self.attrs.items():
                 attrs[attr] = value
-            for dev in self.__devices:
+            for dev in self._devices:
                 dev.write(h5f)
 
     def __init__(self, sample=None, sample_uid=None, location=None, operator=None,
                  description=None, sub_experiment=None, directory=None):
+        """
+        Init function. Meta data as mandatory arguments.
+        """
         if(not sample and description and directory and sample_uid and location and
            sample_uid and operator and sub_experiment):
             raise Exception('Supply sample, sample_uid, location, operator, \
@@ -71,72 +103,72 @@ class Coolector(object):
             self.directory += '/'
 
     def add_device(self, device):
-        self.__devices.append(device)
+        """
+        Add a Cool_device to the coolector.
+        """
+        self._devices.append(device)
 
-    def start(self):
-        if(self.__listen):
+    def start_listening(self):
+        """
+        Start automatic data acquisition.
+        """
+        if(self.thread):
             print('Thread seems to already running! not starting a new one.')
         else:
-            self.__listen = True
-            self.thread = threading.Thread(target=self.__listening, args=())
+            self._listen = True
+            self.thread = threading.Thread(target=self._listening, args=())
             self.thread.start()
             print('Started thread!')
 
-    def stop(self):
-        self.__listen = False
-
-    def disconnect(self):
-        for dev in self.__devices:
-            dev.disconnect()
+    def stop_listening(self):
+        """
+        Stop automatic data acquisition
+        """
+        self._listen = False
 
 
 class Cool_device(object):
     """
-    Write device info to HDF5
+    Abstract base class for reading out a devices, and writing device info to HDF5
     """
     port = None
     pathname = None
     dev_type = None
     is_ready = False
-    data = None
-    x_values = None
-    y_values = None
-    y_scale = None
     potentially_desynced = False
+    array_data = None
 
     meta_pvnames = []
     connected_pvs = []
 
-    def set_ready(self):
+    def set_ready(self, value):
+        """
+        Callback function for arraydata.
+        Mark device as ready for read out, copy data to object.
+        """
         if(self.is_ready):
             warnings.warn("New trigger before readout finished! potentially desynced event!")
             self.potentially_desynced = True
+        else:
+            self.array_data = value
         self.is_ready = True
 
     def sw_trigger(): pass
 
     def is_ready_p(self): return(self.is_ready)
 
-    def write_ds_maybe(self, group, dsname, pvname):
-        if(pvname):
-            ds = group.create_dataset(dsname, data=epics.caget(pvname))
-            ds.attrs['pvname'] = pvname
-
     def write(self, h5f):
+        """
+        Write all pvs in meta_pvnames to file.
+        Set ready back to False.
+        """
         group = h5f.require_group(self.pathname)
         group.attrs['instrument_name'] = self.dev_type
         for pvname in self.meta_pvnames:
             group.attrs[pvname] = epics.caget(pvname)
-        self.write_ds_maybe(group, 'x_values', self.x_values)
-        self.write_ds_maybe(group, 'y_values', self.y_values)
-        self.write_ds_maybe(group, 'y_scale', self.y_scale)
         group.attrs['Potentially desynced'] = self.potentially_desynced
         self.is_ready = False
         self.potentially_desynced = False
-
-    def disconnect(self):
-        for pv in self.connected_pvs:
-            pv.disconnect()
 
 
 class Manta_cam(Cool_device):
@@ -147,10 +179,39 @@ class Manta_cam(Cool_device):
 
     def sw_trigger(self): epics.caput(self.port + ':det1:Acquire', 1)
 
-    def __init__(self, port, SWTrig=False):
+    def set_exposure(self, exposure):
+        """
+        Set exposure if it is within acceptable limits.
+        """
+        exposure = max(exposure, self.exposure_min)
+        exposure = min(exposure, self.exposure_max)
+        print('Setting exposure to: ' + str(exposure))
+        epics.caput(self.port + ':det1:AcquireTime', exposure)
+        time.sleep(0.1)
+
+    def set_gain(self, gain):
+        """
+        Set gain if it is within acceptable limits.
+        """
+        print('Setting gain to: ' + str(gain))
+        epics.caput(self.port + ':det1:Gain', gain)
+        time.sleep(0.1)
+
+    def __init__(self, port,
+                 sw_trig=False,
+                 auto_exposure=False,
+                 exposure=None,
+                 gain=None,
+                 exposure_min=0.0003,
+                 exposure_max=0.1):
         """
         Initialize a manta camera
         """
+        self.auto_exposure = auto_exposure
+        if(auto_exposure):
+            print('Auro exposure is slow! May need a couple of seconds between triggers')
+        self.exposure_min = exposure_min
+        self.exposure_max = exposure_max
         self.port = port
         self.pathname = 'data/images/' + port + '/'
         self.arraydata = port + ':image1:ArrayData'
@@ -166,7 +227,7 @@ class Manta_cam(Cool_device):
         # Set is_ready to True when there is new data
         pv = epics.PV(self.port + ':image1:ArrayData',
                       auto_monitor=True,
-                      callback=lambda pvn=None, v=None, cv=None, **fw: self.set_ready())
+                      callback=lambda pvn=None, v=None, cv=None, **fw: self.set_ready(v))
         self.connected_pvs.append(pv)
         for pvname, value in {':image1:EnableCallbacks': 1,  # Enable
                               ':image1:ArrayCallbacks': 1,  # Enable
@@ -174,11 +235,16 @@ class Manta_cam(Cool_device):
                               ':det1:LEFTSHIFT': 0}.items():  # Disable
             epics.caput(port + pvname, value)
 
-        if(SWTrig):
+        if(sw_trig):
             epics.caput(port + ':det1:ImageMode', 0)  # Get a single image
         else:
             epics.caput(port + ':det1:ImageMode', 1)  # Get images continously
             warnings.warn('Not yet implemented, missing external trigger setting')
+        if(exposure):
+            self.set_exposure(exposure)
+        if(gain):
+            self.set_gain(gain)
+        self.is_ready = False
 
     def write(self, h5f):
         """
@@ -192,6 +258,12 @@ class Manta_cam(Cool_device):
         ds = group.create_dataset('data', data=raw)
         ds.attrs['pvname'] = self.arraydata
         super().write(h5f)
+        if(self.auto_exposure):
+            sm = scipy.ndimage.filters.median_filter(raw, 9).max()
+            max_image = 2**12 - 1
+            exp = epics.caget(self.port + ':det1:AcquireTime_RBV')
+            autoset = exp * (max_image * 0.5)/sm
+            self.set_exposure(autoset)
 
 
 class Thorlabs_spectrometer(Cool_device):
@@ -202,7 +274,7 @@ class Thorlabs_spectrometer(Cool_device):
 
     def sw_trigger(self): epics.caput(self.port + ':det1:Acquire', 1)
 
-    def __init__(self, port, SWTrig=False):
+    def __init__(self, port, sw_trig=False):
         """
         Initialize a Thorlabs spectrometer
         """
@@ -220,7 +292,7 @@ class Thorlabs_spectrometer(Cool_device):
         # Set is_ready to True when there is new data
         pv = epics.PV(self.port + ':trace1:ArrayData',
                       auto_monitor=True,
-                      callback=lambda pvn=None, v=None, cv=None, **fw: self.set_ready())
+                      callback=lambda pvn=None, v=None, cv=None, **fw: self.set_ready(v))
         self.connected_pvs.append(pv)
         for pvname, value in {':det1:TlAcquisitionType': 0,  # 1 is processed, set to 0 for raw
                               ':trace1:EnableCallbacks': 1,  # Enable
@@ -230,7 +302,7 @@ class Thorlabs_spectrometer(Cool_device):
                               ':det1:TlAmplitudeDataGet': 1,  # Get amplitudes
                               ':det1:TlWavelengthDataGet': 1}.items():  # Get waves
             epics.caput(port + pvname, value)
-        if(SWTrig):
+        if(sw_trig):
             for pvname, value in {':det1:ImageMode': 0,  # Single
                                   ':det1:TriggerMode': 0}.items():  # Internal
                 epics.caput(port + pvname, value)
@@ -239,6 +311,20 @@ class Thorlabs_spectrometer(Cool_device):
                                   ':det1:TriggerMode': 1}.items():  # External
                 epics.caput(port + pvname, value)
                 warnings.warn('Not yet implemented')
+        self.is_ready = False
+
+    def write_ds(self, group, dsname, pvname, data=False):
+        if(not data):
+            data = epics.caget(pvname)
+        ds = group.create_dataset(dsname, data=data)
+        ds.attrs['pvname'] = pvname
+
+    def write(self, h5f):
+        group = h5f.require_group(self.pathname)
+        self.write_ds(group, 'x_values', self.x_values)
+        self.write_ds(group, 'y_values', self.y_values, self.array_data)
+        self.write_ds(group, 'y_scale', self.y_scale)
+        super().write(h5f)
 
 
 class RNG(Cool_device):
@@ -256,7 +342,7 @@ class RNG(Cool_device):
         if(not self.is_ready):
             threading.Thread(target=self.populate, args=()).start()
 
-    def __init__(self, port, SWTrig=False):
+    def __init__(self, port, sw_trig=False):
         self.port = port
         self.pathname = 'data/rng/' + self.port + '/'
 
