@@ -1,22 +1,20 @@
 import lib.data_coolection as cool
 import time
 
-if __name__ == '__main__':
-    # Supress warnings from EPICS
-    cool.hush()
-    # Set up the data collector
-    c = cool.Coolector(sample='M660L4',
-                       sample_uid='NA',
-                       location='Prototype lab',
-                       operator='Haavard',
-                       description='Testing DAQ code with Manta g-235 and CCS100',
-                       sub_experiment='NA',
-                       directory='/var/data/lab/2017-12-07/test/')
+# Supress warnings from EPICS
+cool.hush()
+with cool.Coolector(sample='M660L4',
+                    sample_uid='NA',
+                    location='Prototype lab',
+                    operator='Haavard',
+                    description='Testing DAQ code with Manta g-235 and CCS100',
+                    sub_experiment='NA',
+                    directory='/tmp/') as c:
     # Add devices
     c.add_device(cool.Thorlabs_spectrometer('CCS1', sw_trig=True))
     cam = cool.Manta_cam('CAM1',
                          sw_trig=True,
-                         auto_exposure=True,
+                         auto_exposure=False,
                          exposure=0.000994,
                          gain=0,
                          exposure_max=0.1)
@@ -39,6 +37,6 @@ if __name__ == '__main__':
     for trig in range(10):
         print('TRIG!')
         c.sw_trigger()
-        time.sleep(.1)
+        time.sleep(.2)
     # Stop listening for triggers
     c.stop_listening()

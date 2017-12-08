@@ -5,6 +5,7 @@ import time
 import numpy
 import scipy.ndimage
 import warnings
+import numbers
 
 
 def hush():
@@ -81,6 +82,9 @@ class Coolector(object):
                 attrs[attr] = value
             for dev in self._devices:
                 dev.write(h5f)
+        for dev in self._devices:
+            dev.is_ready = False
+            dev.potentially_desynced = False
 
     def __init__(self, sample=None, sample_uid=None, location=None, operator=None,
                  description=None, sub_experiment=None, directory=None):
@@ -126,6 +130,15 @@ class Coolector(object):
         """
         self._listen = False
 
+    def __enter__(self):
+        return(self)
+
+    def __exit__(self, type, value, traceback):
+        for dev in self._devices:
+            for pv in dev.connected_pvs:
+                pv.disconnect()
+        self._devices.clear()
+
 
 class Cool_device(object):
     """
@@ -167,8 +180,12 @@ class Cool_device(object):
         for pvname in self.meta_pvnames:
             group.attrs[pvname] = epics.caget(pvname)
         group.attrs['Potentially desynced'] = self.potentially_desynced
-        self.is_ready = False
-        self.potentially_desynced = False
+
+    def write_ds(self, group, dsname, pvname, data=False):
+        if(not data):
+            data = epics.caget(pvname)
+        ds = group.create_dataset(dsname, data=data)
+        ds.attrs['pvname'] = pvname
 
 
 class Manta_cam(Cool_device):
@@ -207,6 +224,7 @@ class Manta_cam(Cool_device):
         """
         Initialize a manta camera
         """
+        print('In init!')
         self.auto_exposure = auto_exposure
         if(auto_exposure):
             print('Auro exposure is slow! May need a couple of seconds between triggers')
@@ -240,9 +258,10 @@ class Manta_cam(Cool_device):
         else:
             epics.caput(port + ':det1:ImageMode', 1)  # Get images continously
             warnings.warn('Not yet implemented, missing external trigger setting')
+        print('Exposure setting!')
         if(exposure):
             self.set_exposure(exposure)
-        if(gain):
+        if(isinstance(gain, numbers.Number)):
             self.set_gain(gain)
         self.is_ready = False
 
@@ -251,13 +270,14 @@ class Manta_cam(Cool_device):
         Overload write to file function. Needed here in order to reshape
         the image from array to vector.
         """
+        super().write(h5f)
         raw = epics.caget(self.arraydata)
         raw = raw.reshape(epics.caget(self.port + ':det1:SizeY_RBV'),
                           epics.caget(self.port + ':det1:SizeX_RBV'))
         group = h5f.require_group(self.pathname)
         ds = group.create_dataset('data', data=raw)
         ds.attrs['pvname'] = self.arraydata
-        super().write(h5f)
+        # This must occur after super()
         if(self.auto_exposure):
             sm = scipy.ndimage.filters.median_filter(raw, 9).max()
             max_image = 2**12 - 1
@@ -313,18 +333,62 @@ class Thorlabs_spectrometer(Cool_device):
                 warnings.warn('Not yet implemented')
         self.is_ready = False
 
-    def write_ds(self, group, dsname, pvname, data=False):
-        if(not data):
-            data = epics.caget(pvname)
-        ds = group.create_dataset(dsname, data=data)
-        ds.attrs['pvname'] = pvname
-
     def write(self, h5f):
         group = h5f.require_group(self.pathname)
         self.write_ds(group, 'x_values', self.x_values)
         self.write_ds(group, 'y_values', self.y_values, self.array_data)
         self.write_ds(group, 'y_scale', self.y_scale)
         super().write(h5f)
+
+
+class PM100(Cool_device):
+    """
+    Thorlabs PM100USB
+    """
+    dev_type = 'Thorlabs PM100USB'
+    n_samples = 100
+
+    times = []
+
+    def add_datapoint(self, value, pvn):
+        self.array_data.append(value)
+        self.times.append(time.time())
+
+    def populate(self):
+        pmvals = []
+        scan_mode = epics.caget(self.port + ':MEAS:POW.SCAN')
+        epics.caput(self.port + ':MEAS:POW.SCAN', 9)
+
+        pv = epics.PV(self.port + ':MEAS:POW')
+        pv.add_callback(
+            lambda pvname=None, value=None, char_value=None, **fw:
+            pmvals.append((value, time.time())))
+        time.sleep(10)
+        pv.disconnect()
+        epics.caput(self.port + ':MEAS:POW.SCAN', scan_mode)
+        self.array_data = [a[0] for a in pmvals]
+        self.times = [a[1] for a in pmvals]
+        self.is_ready = True
+
+    def sw_trigger(self):
+        "Trigger starts data collection thread"
+        if(not self.is_ready):
+            threading.Thread(target=self.populate, args=()).start()
+
+    def __init__(self, port, sw_trig=False):
+        self.port = port
+        self.pm_pv = self.port + ':MEAS:POW'
+        self.pathname = 'data/powermeter/' + self.port + '/'
+        self.meta_pvnames = [self.port + ':SENS:CORR:WAV_RBV']
+
+    def write(self, h5f):
+        epics.caput(self.port + ':SENS:CORR:WAV_RBV.PROC', 1)
+        time.sleep(0.01)
+        super().write(h5f)
+        group = h5f.require_group(self.pathname)
+        self.write_ds(group, 'y_values', self.pm_pv, self.array_data)
+        ds = group.create_dataset('x_values', data=self.times)
+        ds.attrs['pvname'] = 'time from trigger'
 
 
 class RNG(Cool_device):
@@ -347,8 +411,7 @@ class RNG(Cool_device):
         self.pathname = 'data/rng/' + self.port + '/'
 
     def write(self, h5f):
+        super().write(h5f)
         group = h5f.require_group(self.pathname)
         group.attrs['length'] = 100
-        group.attrs['Ignore'] = 'Please'
         group.create_dataset('y_values', data=self.datavec)
-        super().write(h5f)
