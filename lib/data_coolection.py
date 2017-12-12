@@ -36,6 +36,9 @@ class Coolector(object):
                 ready = False
         return(ready)
 
+    def cd(self, dir):
+        self.directory = dir
+
     def wait_for_data(self):
         """
         Wait until all devices are ready, then read the all out
@@ -294,7 +297,15 @@ class Thorlabs_spectrometer(Cool_device):
 
     def sw_trigger(self): epics.caput(self.port + ':det1:Acquire', 1)
 
-    def __init__(self, port, sw_trig=False):
+    def set_exposure(self, exposure):
+        """
+        Set exposure
+        """
+        print('Setting exposure to: ' + str(exposure))
+        epics.caput(self.port + ':det1:AcquireTime', exposure)
+        time.sleep(0.1)
+
+    def __init__(self, port, sw_trig=False, exposure=None):
         """
         Initialize a Thorlabs spectrometer
         """
@@ -331,6 +342,8 @@ class Thorlabs_spectrometer(Cool_device):
                                   ':det1:TriggerMode': 1}.items():  # External
                 epics.caput(port + pvname, value)
                 warnings.warn('Not yet implemented')
+        if(exposure):
+            self.set_exposure(exposure)
         self.is_ready = False
 
     def write(self, h5f):
