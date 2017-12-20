@@ -23,6 +23,7 @@ with cool.Coolector(sample='M660L4',
     c.attrs['sub_experiment'] = 'Testing manual SW triggers with manual readout'
     c.attrs['extra_attribute'] = 123
 
+
     for trig in range(10):
         print('TRIG!')
         c.sw_trigger()

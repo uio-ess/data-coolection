@@ -1,5 +1,5 @@
-import epics
 import h5py
+import epics
 import threading
 import time
 import numpy
