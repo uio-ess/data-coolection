@@ -18,7 +18,7 @@ def hush():
 
 class Coolector(object):
     """
-    Collect data from Cool devices, put them in HDF5 files
+    Collect data from Cool devices, put them in HDF5 files.
     """
     pause = 0.001
     triggerID = 0
@@ -37,6 +37,7 @@ class Coolector(object):
         return(ready)
 
     def cd(self, dir):
+        """ Change directory """
         self.directory = dir
 
     def wait_for_data(self):
@@ -51,7 +52,7 @@ class Coolector(object):
 
     def _listening(self):
         """
-        Take data whenever all devices are ready for read out
+        Periodically check if devices are ready, if so, read out
         """
         print('Listening!')
         while(self._listen):
@@ -85,6 +86,7 @@ class Coolector(object):
                 attrs[attr] = value
             for dev in self._devices:
                 dev.write(h5f)
+        # All devices are read out, we can now wait for new data
         for dev in self._devices:
             dev.is_ready = False
             dev.potentially_desynced = False
@@ -114,6 +116,7 @@ class Coolector(object):
         Add a Cool_device to the coolector.
         """
         self._devices.append(device)
+        device.is_ready = False
 
     def start_listening(self):
         """
@@ -133,19 +136,10 @@ class Coolector(object):
         """
         self._listen = False
 
-    def __enter__(self):
-        return(self)
-
-    def __exit__(self, type, value, traceback):
-        for dev in self._devices:
-            for pv in dev.connected_pvs:
-                pv.disconnect()
-        self._devices.clear()
-
-
+ 
 class Cool_device(object):
     """
-    Abstract base class for reading out a devices, and writing device info to HDF5
+    Base class for reading out a devices, and writing device info to HDF5
     """
     port = None
     pathname = None
@@ -159,8 +153,8 @@ class Cool_device(object):
 
     def set_ready(self, value):
         """
-        Callback function for arraydata.
         Mark device as ready for read out, copy data to object.
+        This is intended as a callback funtion for a pv
         """
         if(self.is_ready):
             warnings.warn("New trigger before readout finished! potentially desynced event!")
@@ -171,12 +165,12 @@ class Cool_device(object):
 
     def sw_trigger(): pass
 
-    def is_ready_p(self): return(self.is_ready)
+    def is_ready_p(self):
+        return(self.is_ready)
 
     def write(self, h5f):
         """
         Write all pvs in meta_pvnames to file.
-        Set ready back to False.
         """
         group = h5f.require_group(self.pathname)
         group.attrs['instrument_name'] = self.dev_type
@@ -190,6 +184,13 @@ class Cool_device(object):
         ds = group.create_dataset(dsname, data=data)
         ds.attrs['pvname'] = pvname
 
+    def pv_to_hdf5(self, prefix, *pvs):
+        """
+        Make a list of pvnames that should be read out to hdf5
+        """
+        for pv in pvs:
+            self.meta_pvnames.append(prefix + pv)
+
 
 class Manta_cam(Cool_device):
     """
@@ -197,7 +198,9 @@ class Manta_cam(Cool_device):
     """
     dev_type = 'Manta camera'
 
-    def sw_trigger(self): epics.caput(self.port + ':det1:Acquire', 1)
+    def sw_trigger(self):
+        """ Set Ackuire to True """
+        epics.caput(self.port + ':det1:Acquire', 1)
 
     def set_exposure(self, exposure):
         """
@@ -211,7 +214,7 @@ class Manta_cam(Cool_device):
 
     def set_gain(self, gain):
         """
-        Set gain if it is within acceptable limits.
+        Set gain.
         """
         print('Setting gain to: ' + str(gain))
         epics.caput(self.port + ':det1:Gain', gain)
@@ -227,7 +230,7 @@ class Manta_cam(Cool_device):
         """
         Initialize a manta camera
         """
-        print('In init!')
+        # Deal with init arguments
         self.auto_exposure = auto_exposure
         if(auto_exposure):
             print('Auro exposure is slow! May need a couple of seconds between triggers')
@@ -236,20 +239,27 @@ class Manta_cam(Cool_device):
         self.port = port
         self.pathname = 'data/images/' + port + '/'
         self.arraydata = port + ':image1:ArrayData'
+
         # PVs that will be dumped to file
-        self.meta_pvnames = [self.port + pvn for pvn in [':det1:SizeX_RBV',
-                                                         ':det1:SizeY_RBV',
-                                                         ':det1:Manufacturer_RBV',
-                                                         ':det1:Model_RBV',
-                                                         ':det1:AcquireTime_RBV',
-                                                         ':det1:Gain_RBV',
-                                                         ':det1:LEFTSHIFT_RBV',
-                                                         ':det1:DataType_RBV']]
-        # Set is_ready to True when there is new data
+        self.pv_to_hdf5(self.port, 
+                        ':det1:SizeX_RBV',
+                        ':det1:SizeY_RBV',
+                        ':det1:Manufacturer_RBV',
+                        ':det1:Model_RBV',
+                        ':det1:AcquireTime_RBV',
+                        ':det1:Gain_RBV',
+                        ':det1:LEFTSHIFT_RBV',
+                        ':det1:DataType_RBV')
+
+        # When port + :image1:ArrayData has new data, we are ready for read out
+        # Callback function sets the is_ready flag to True
         pv = epics.PV(self.port + ':image1:ArrayData',
                       auto_monitor=True,
                       callback=lambda pvn=None, v=None, cv=None, **fw: self.set_ready(v))
         self.connected_pvs.append(pv)
+
+
+        # Initialize device
         for pvname, value in {':image1:EnableCallbacks': 1,  # Enable
                               ':image1:ArrayCallbacks': 1,  # Enable
                               ':det1:DataType': 1,  # UInt16, 12-bit
@@ -261,18 +271,19 @@ class Manta_cam(Cool_device):
         else:
             epics.caput(port + ':det1:ImageMode', 1)  # Get images continously
             warnings.warn('Not yet implemented, missing external trigger setting')
-        print('Exposure setting!')
+
+        # Set exposure and gain from init arguments
         if(exposure):
             self.set_exposure(exposure)
-        if(isinstance(gain, numbers.Number)):
+        if(isinstance(gain, numbers.Number)): # We must be able to set this to 0
             self.set_gain(gain)
-        self.is_ready = False
 
     def write(self, h5f):
         """
         Overload write to file function. Needed here in order to reshape
         the image from array to vector.
         """
+        # Call parent funciton to write pv metadata
         super().write(h5f)
         raw = epics.caget(self.arraydata)
         raw = raw.reshape(epics.caget(self.port + ':det1:SizeY_RBV'),
@@ -280,7 +291,8 @@ class Manta_cam(Cool_device):
         group = h5f.require_group(self.pathname)
         ds = group.create_dataset('data', data=raw)
         ds.attrs['pvname'] = self.arraydata
-        # This must occur after super()
+        # Correct exposure based on image if auto_exposure is True
+        # This must occur after super(), so metadata is written before it is changed
         if(self.auto_exposure):
             sm = scipy.ndimage.filters.median_filter(raw, 9).max()
             max_image = 2**12 - 1
@@ -291,7 +303,7 @@ class Manta_cam(Cool_device):
 
 class Thorlabs_spectrometer(Cool_device):
     """
-    Thorlabs CCS spectrometer
+    Thorlabs CCS100 spectrometer
     """
     dev_type = 'Thorlabs spectrometer'
 
@@ -312,19 +324,24 @@ class Thorlabs_spectrometer(Cool_device):
         self.port = port
         self.pathname = 'data/spectra/' + port + '/'
         self.arraydata = port + ':trace1:ArrayData'
+
         # PVs that will be dumped to file
-        self.meta_pvnames = [self.port + pvn for pvn in [':det1:AcquireTime_RBV',
-                                                         ':det1:Manufacturer_RBV',
-                                                         ':det1:Model_RBV']]
+        self.pv_to_hdf5(self.port,
+                        ':det1:AcquireTime_RBV',
+                        ':det1:Manufacturer_RBV',
+                        ':det1:Model_RBV')
+
         self.y_values = port + ':trace1:ArrayData'
         self.x_values = port + ':det1:TlWavelengthData_RBV'
         self.y_scale = port + ':det1:TlAmplitudeData_RBV'
 
-        # Set is_ready to True when there is new data
+        # Set is_ready to True when there is new data using a callback
         pv = epics.PV(self.port + ':trace1:ArrayData',
                       auto_monitor=True,
                       callback=lambda pvn=None, v=None, cv=None, **fw: self.set_ready(v))
         self.connected_pvs.append(pv)
+
+        # Initialize device
         for pvname, value in {':det1:TlAcquisitionType': 0,  # 1 is processed, set to 0 for raw
                               ':trace1:EnableCallbacks': 1,  # Enable
                               ':trace1:ArrayCallbacks': 1,  # Enable
@@ -342,9 +359,11 @@ class Thorlabs_spectrometer(Cool_device):
                                   ':det1:TriggerMode': 1}.items():  # External
                 epics.caput(port + pvname, value)
                 warnings.warn('Not yet implemented')
+
+        # Set exposure from argument
+        if(isinstance(exposure, numbers.Number)):
         if(exposure):
             self.set_exposure(exposure)
-        self.is_ready = False
 
     def write(self, h5f):
         group = h5f.require_group(self.pathname)
@@ -363,24 +382,24 @@ class PM100(Cool_device):
 
     times = []
 
-    def add_datapoint(self, value, pvn):
-        self.array_data.append(value)
-        self.times.append(time.time())
-
     def populate(self):
+        """ Fill a list of PM values with timestamps, sample for 10 seconds """
         pmvals = []
         scan_mode = epics.caget(self.port + ':MEAS:POW.SCAN')
         epics.caput(self.port + ':MEAS:POW.SCAN', 9)
 
+        # Use callback to populate list
         pv = epics.PV(self.port + ':MEAS:POW')
         pv.add_callback(
             lambda pvname=None, value=None, char_value=None, **fw:
             pmvals.append((value, time.time())))
+
         time.sleep(10)
         pv.disconnect()
         epics.caput(self.port + ':MEAS:POW.SCAN', scan_mode)
         self.array_data = [a[0] for a in pmvals]
         self.times = [a[1] for a in pmvals]
+        # We are done and ready for read out
         self.is_ready = True
 
     def sw_trigger(self):
@@ -389,12 +408,14 @@ class PM100(Cool_device):
             threading.Thread(target=self.populate, args=()).start()
 
     def __init__(self, port, sw_trig=False):
+        """ Initialize pm100 """
         self.port = port
         self.pm_pv = self.port + ':MEAS:POW'
         self.pathname = 'data/powermeter/' + self.port + '/'
         self.meta_pvnames = [self.port + ':SENS:CORR:WAV_RBV']
 
     def write(self, h5f):
+        # We must trigger an uptade to WAV_RBV before the PV is written to file
         epics.caput(self.port + ':SENS:CORR:WAV_RBV.PROC', 1)
         time.sleep(0.01)
         super().write(h5f)
