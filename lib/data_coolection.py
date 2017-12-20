@@ -361,7 +361,6 @@ class Thorlabs_spectrometer(Cool_device):
                 warnings.warn('Not yet implemented')
 
         # Set exposure from argument
-        if(isinstance(exposure, numbers.Number)):
         if(exposure):
             self.set_exposure(exposure)
 
