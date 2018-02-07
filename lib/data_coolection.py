@@ -368,6 +368,64 @@ class Thorlabs_spectrometer(Cool_device):
         ds = h5g.create_dataset('y_data', data=epics.caget(pvname))
         ds.attrs['pvname'] = pvname
 
+class Picoscope(Cool_device):
+    """
+    Picoscope 4262
+    """
+    dev_type = 'Thorlabs spectrometer'
+
+    def sw_trigger(self): epics.caput(self.port + ':det1:Acquire', 1)
+
+    def __init__(self, port, channel='A', range=0, sw_trig=False):
+        """
+        Initialize a picoscope
+        """
+        self.port = port
+        self.pathname = 'data/wavefront/' + port + '/'
+        self.arraydatapv = port + ':trace1:ArrayData'
+
+        # PVs that will be dumped to file
+        self.pv_to_hdf5(self.port,
+                        ':det1:Serial_RBV',
+                        #':det1:Manufacturer_RBV',
+                        ':det1:Model_RBV',
+                        ':det1:TimeBase_RBV',
+                        ':det1:DataType_RBV',
+                        ':det1:ArrayCounter_RBV')
+
+        # Set is_ready to True when there is new data using a callback
+        pv = epics.PV(self.port + ':trace1:ArrayData',
+                      auto_monitor=True,
+                      callback=lambda pvn=None, v=None, cv=None, **fw: self.set_ready(pvn, v))
+        self.connected_pvs.append(pv)
+
+        # Initialize device
+        for pvname, value in {':trace1:EnableCallbacks': 1,  # Enable
+                              ':det1:ArrayCallbacks': 1}.items():  # Get waves
+            epics.caput(port + pvname, value)
+                              
+        for pvname, value in {'Enabled': 1,
+                              'Coupling': 0,
+                              'Range': range}.items():
+            epics.caput(port + ':det1:' + channel + ':' + pvname, value)
+            
+
+        if(sw_trig):
+            for pvname, value in {':det1:ExtTriggerEnabled':0}.items():  # Internal
+                epics.caput(port + pvname, value)
+        else:
+            for pvname, value in {':det1:ExtTrigEnabled':1,
+                                  ':det1:ExtTrigRange':1,
+                                  ':det1:ExtTrigThr':1000,
+                                  ':det1:ExtTrigThrDir':0,
+                                  ':det1:Acquire':1}.items():  # External
+                epics.caput(port + pvname, value)
+
+    def write_datasets(self, h5g):
+        pvname = self.port + ':trace1:ArrayData'
+        # ds = h5g.create_dataset('y_data', data=self.array_data)
+        ds = h5g.create_dataset('y_data', data=epics.caget(pvname))
+        ds.attrs['pvname'] = pvname
 
 class PM100(Cool_device):
     """

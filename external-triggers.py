@@ -1,4 +1,5 @@
 import lib.data_coolection as cool
+import time
 
 # Supress warnings from EPICS
 cool.hush()
@@ -11,6 +12,7 @@ c = cool.Coolector(sample='Office 391',
                    directory='/tmp/')
 # Add devices
 c.add_device(cool.Thorlabs_spectrometer('CCS1', sw_trig=False))
+c.add_device(cool.Picoscope('PICO1', sw_trig=False))
 c.add_device(cool.Manta_cam('CAM1',
                             sw_trig=False,
                             auto_exposure=False,
@@ -20,4 +22,5 @@ c.add_device(cool.Manta_cam('CAM1',
 
 for trig in range(10):
     c.wait_for_data()
+    print(time.time())
     print("Got one! " + str(trig))
