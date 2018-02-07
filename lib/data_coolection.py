@@ -136,7 +136,7 @@ class Coolector(object):
         """
         self._listen = False
 
- 
+
 class Cool_device(object):
     """
     Base class for reading out a devices, and writing device info to HDF5
@@ -151,7 +151,7 @@ class Cool_device(object):
     meta_pvnames = []
     connected_pvs = []
 
-    def set_ready(self, value):
+    def set_ready(self, pvn, value):
         """
         Mark device as ready for read out, copy data to object.
         This is intended as a callback funtion for a pv
@@ -160,6 +160,7 @@ class Cool_device(object):
             warnings.warn("New trigger before readout finished! potentially desynced event!")
             self.potentially_desynced = True
         else:
+            # Why does this not work???
             self.array_data = value
         self.is_ready = True
 
@@ -167,6 +168,9 @@ class Cool_device(object):
 
     def is_ready_p(self):
         return(self.is_ready)
+
+    def write_datasets(self, group):
+        pass
 
     def write(self, h5f):
         """
@@ -177,12 +181,7 @@ class Cool_device(object):
         for pvname in self.meta_pvnames:
             group.attrs[pvname] = epics.caget(pvname)
         group.attrs['Potentially desynced'] = self.potentially_desynced
-
-    def write_ds(self, group, dsname, pvname, data=False):
-        if(not data):
-            data = epics.caget(pvname)
-        ds = group.create_dataset(dsname, data=data)
-        ds.attrs['pvname'] = pvname
+        self.write_datasets(group)
 
     def pv_to_hdf5(self, prefix, *pvs):
         """
@@ -238,10 +237,9 @@ class Manta_cam(Cool_device):
         self.exposure_max = exposure_max
         self.port = port
         self.pathname = 'data/images/' + port + '/'
-        self.arraydata = port + ':image1:ArrayData'
 
         # PVs that will be dumped to file
-        self.pv_to_hdf5(self.port, 
+        self.pv_to_hdf5(self.port,
                         ':det1:SizeX_RBV',
                         ':det1:SizeY_RBV',
                         ':det1:Manufacturer_RBV',
@@ -255,9 +253,8 @@ class Manta_cam(Cool_device):
         # Callback function sets the is_ready flag to True
         pv = epics.PV(self.port + ':image1:ArrayData',
                       auto_monitor=True,
-                      callback=lambda pvn=None, v=None, cv=None, **fw: self.set_ready(v))
+                      callback=lambda pvn=None, v=None, cv=None, **fw: self.set_ready(pvn, v))
         self.connected_pvs.append(pv)
-
 
         # Initialize device
         for pvname, value in {':image1:EnableCallbacks': 1,  # Enable
@@ -269,32 +266,29 @@ class Manta_cam(Cool_device):
         if(sw_trig):
             epics.caput(port + ':det1:ImageMode', 0)  # Get a single image
         else:
-            epics.caput(port + ':det1:ImageMode', 1)  # Get images continously
-            warnings.warn('Not yet implemented, missing external trigger setting')
-
+            epics.caput(port + ':det1:ImageMode', 2)  # Get images continously
+            epics.caput(port + ':det1:TriggerMode', 1) # Enable trigger mode
+            epics.caput(port + ':det1:TriggerSelector', 0) # Enable trigger mode
+            epics.caput(port + ':det1:TriggerSource', 1) # Enable trigger mode
+            epics.caput(port + ':det1:Acquire', 1)
+            
         # Set exposure and gain from init arguments
         if(exposure):
             self.set_exposure(exposure)
-        if(isinstance(gain, numbers.Number)): # We must be able to set this to 0
+        if(isinstance(gain, numbers.Number)):  # We must be able to set this to 0
             self.set_gain(gain)
 
-    def write(self, h5f):
-        """
-        Overload write to file function. Needed here in order to reshape
-        the image from array to vector.
-        """
-        # Call parent funciton to write pv metadata
-        super().write(h5f)
-        raw = epics.caget(self.arraydata)
-        raw = raw.reshape(epics.caget(self.port + ':det1:SizeY_RBV'),
-                          epics.caget(self.port + ':det1:SizeX_RBV'))
-        group = h5f.require_group(self.pathname)
-        ds = group.create_dataset('data', data=raw)
-        ds.attrs['pvname'] = self.arraydata
-        # Correct exposure based on image if auto_exposure is True
-        # This must occur after super(), so metadata is written before it is changed
+    def write_datasets(self, h5g):
+        # data = self.attay_data.reshape(epics.caget(self.port + ':det1:SizeY_RBV'),
+        #                                epics.caget(self.port + ':det1:SizeX_RBV'))
+        data = epics.caget(self.port + ':image1:ArrayData')
+        data = data.reshape(epics.caget(self.port + ':det1:SizeY_RBV'),
+                            epics.caget(self.port + ':det1:SizeX_RBV'))
+        ds = h5g.create_dataset('data', data=data)
+        ds.attrs['pvname'] = self.port + ':image1:ArrayData'
+        # Auto exposure, this should happen after all pvs are written to file
         if(self.auto_exposure):
-            sm = scipy.ndimage.filters.median_filter(raw, 9).max()
+            sm = scipy.ndimage.filters.median_filter(self.array_data, 9).max()
             max_image = 2**12 - 1
             exp = epics.caget(self.port + ':det1:AcquireTime_RBV')
             autoset = exp * (max_image * 0.5)/sm
@@ -323,7 +317,7 @@ class Thorlabs_spectrometer(Cool_device):
         """
         self.port = port
         self.pathname = 'data/spectra/' + port + '/'
-        self.arraydata = port + ':trace1:ArrayData'
+        self.arraydatapv = port + ':trace1:ArrayData'
 
         # PVs that will be dumped to file
         self.pv_to_hdf5(self.port,
@@ -331,14 +325,10 @@ class Thorlabs_spectrometer(Cool_device):
                         ':det1:Manufacturer_RBV',
                         ':det1:Model_RBV')
 
-        self.y_values = port + ':trace1:ArrayData'
-        self.x_values = port + ':det1:TlWavelengthData_RBV'
-        self.y_scale = port + ':det1:TlAmplitudeData_RBV'
-
         # Set is_ready to True when there is new data using a callback
         pv = epics.PV(self.port + ':trace1:ArrayData',
                       auto_monitor=True,
-                      callback=lambda pvn=None, v=None, cv=None, **fw: self.set_ready(v))
+                      callback=lambda pvn=None, v=None, cv=None, **fw: self.set_ready(pvn, v))
         self.connected_pvs.append(pv)
 
         # Initialize device
@@ -356,20 +346,27 @@ class Thorlabs_spectrometer(Cool_device):
                 epics.caput(port + pvname, value)
         else:
             for pvname, value in {':det1:ImageMode': 1,  # Continuous
+                                  ':det1:Acquire': 1,
                                   ':det1:TriggerMode': 1}.items():  # External
                 epics.caput(port + pvname, value)
-                warnings.warn('Not yet implemented')
 
         # Set exposure from argument
         if(exposure):
             self.set_exposure(exposure)
 
-    def write(self, h5f):
-        group = h5f.require_group(self.pathname)
-        self.write_ds(group, 'x_values', self.x_values)
-        self.write_ds(group, 'y_values', self.y_values, self.array_data)
-        self.write_ds(group, 'y_scale', self.y_scale)
-        super().write(h5f)
+    def write_datasets(self, h5g):
+        pvname = self.port + ':det1:TlWavelengthData_RBV'
+        ds = h5g.create_dataset('x_values', data=epics.caget(pvname))
+        ds.attrs['pvname'] = pvname
+
+        pvname = self.port + ':det1:TlAmplitudeData_RBV'
+        ds = h5g.create_dataset('y_scale', data=epics.caget(pvname))
+        ds.attrs['pvname'] = pvname
+
+        pvname = self.port + ':trace1:ArrayData'
+        # ds = h5g.create_dataset('y_data', data=self.array_data)
+        ds = h5g.create_dataset('y_data', data=epics.caget(pvname))
+        ds.attrs['pvname'] = pvname
 
 
 class PM100(Cool_device):
@@ -413,15 +410,17 @@ class PM100(Cool_device):
         self.pathname = 'data/powermeter/' + self.port + '/'
         self.meta_pvnames = [self.port + ':SENS:CORR:WAV_RBV']
 
+    def write_datasets(self, h5g):
+        ds = h5g.create_dataset('x_values', data=self.times)
+        ds.attrs['pvname'] = 'Time from trigger'
+        ds = h5g.create_dataset('y_values', data=self.array_data)
+        ds.attrs['pvname'] = self.pm_pv
+
     def write(self, h5f):
         # We must trigger an uptade to WAV_RBV before the PV is written to file
         epics.caput(self.port + ':SENS:CORR:WAV_RBV.PROC', 1)
         time.sleep(0.01)
         super().write(h5f)
-        group = h5f.require_group(self.pathname)
-        self.write_ds(group, 'y_values', self.pm_pv, self.array_data)
-        ds = group.create_dataset('x_values', data=self.times)
-        ds.attrs['pvname'] = 'time from trigger'
 
 
 class RNG(Cool_device):
@@ -432,6 +431,7 @@ class RNG(Cool_device):
     datavec = None
 
     def populate(self):
+        """ Some thing must set self.is_ready to true when device is ready for readout """
         self.datavec = numpy.random.rand(100)
         self.is_ready = True
 
@@ -443,8 +443,5 @@ class RNG(Cool_device):
         self.port = port
         self.pathname = 'data/rng/' + self.port + '/'
 
-    def write(self, h5f):
-        super().write(h5f)
-        group = h5f.require_group(self.pathname)
-        group.attrs['length'] = 100
-        group.create_dataset('y_values', data=self.datavec)
+    def write_datasets(self, h5g):
+        h5g.create_dataset('y_values', data=self.datavec)
