@@ -29,13 +29,20 @@ class Coolector(object):
 
     def check_if_ready(self):
         """
-        Are all devices ready for readi out?
+        Are all devices ready for ready out?
         """
         ready = True
         for dev in self._devices:
             if(not dev.is_ready_p()):
                 ready = False
         return(ready)
+
+    def clear(self):
+        """
+        Clear devices of old data.
+        """
+        for dev in self._devices:
+            dev.clear()
 
     def cd(self, dir):
         """ Change directory """
@@ -85,7 +92,7 @@ class Coolector(object):
         # All devices are read out, we can now wait for new data
         self.latest_file_name = fname
         for dev in self._devices:
-            dev.is_ready = False
+            dev.clear()
             dev.potentially_desynced = False
 
     def __init__(self, sample=None, sample_uid=None, location=None, operator=None,
@@ -113,7 +120,7 @@ class Coolector(object):
         Add a Cool_device to the coolector.
         """
         self._devices.append(device)
-        device.is_ready = False
+        device.clear()
 
     # Code below starts a thread listening for triggers, instead of waiting in the main thread
     def _listening(self):
@@ -177,6 +184,10 @@ class Cool_device(object):
         """ Is the device ready for readout? EPICS devices rely on set_ready callback to set is_ready,
         non epics devices should probably overload """
         return(self.is_ready)
+
+    def clear(self):
+        """ Clear data from device. For EPICS devices, sinply set is_ready to false. """
+        self.is_ready = False
 
     def write_datasets(self, group):
         """
