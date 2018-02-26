@@ -4,20 +4,22 @@ import matplotlib.pyplot as plt
 
 # Supress warnings from EPICS
 cool.hush()
-c = cool.Coolector(sample='TestPatternCoolDayAfter',
+c = cool.Coolector(sample='Dummy',
                    sample_uid='NA',
                    location='Prototype lab',
                    operator='Haavard',
-                   description='Testing DAQ code with Manta g-125, PM100 and CCS100',
+                   description='Heating M1 with mount in the prototype',
                    sub_experiment='NA',
                    directory='/tmp/')
 # Add devices
-cam = cool.Manta_cam('CAM1', sw_trig=True, auto_exposure=False,
-                     exposure=0.300, gain=0, exposure_max=0.4)
+cam = cool.Manta_cam('CAM1', sw_trig=True, exposure=0.0010, gain=0, exposure_max=0.4)
 c.add_device(cam)
 
 plt.ion()
+# plt.colorbar(0, 4096)
 fig = plt.figure()
+
+cam.auto_exposure()
 
 while(True):
     c.sw_trigger()
@@ -27,4 +29,4 @@ while(True):
         ax = fig.add_subplot(111)
         ax.matshow(image)
         plt.draw()
-        plt.pause(30)
+        plt.pause(0.2)

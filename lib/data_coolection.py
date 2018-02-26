@@ -6,6 +6,7 @@ import numpy
 import scipy.ndimage
 import warnings
 import numbers
+from ps4262 import ps4262
 
 
 def hush():
@@ -25,6 +26,7 @@ class Coolector(object):
     _devices = []
     _listen = False
     thread = None
+
     latest_file_name = None
 
     def check_if_ready(self):
@@ -59,6 +61,7 @@ class Coolector(object):
                 got_data_p = True
                 break
             if(time.time() - tzero > timeout):
+                print('Timed out while waiting for trigger!')
                 break
             time.sleep(self.pause)
         if(got_data_p):
@@ -75,9 +78,14 @@ class Coolector(object):
         """
         Write meta data + device data for all connected devices
         """
-        # This is the accepted trigger count, there should be a way of getting
-        # global trigger ID
         self.triggerID += 1
+        trigger = self.triggerID
+        for dev in self._devices:
+            glob_trig = dev.get_glob_trigger()
+            if(glob_trig):
+                print('Setting global trigger to ' + str(glob_trig))
+                trigger = glob_trig
+
         timestamp = time.time()
         fname = '{0}{1:016d}-{2}.h5'.format(self.directory, trigger, self.sample)
         print('Writing to ' + fname)
@@ -85,6 +93,7 @@ class Coolector(object):
             attrs = h5f.get('/').attrs
             attrs['timestamp'] = timestamp
             attrs['trigger_id'] = trigger
+            attrs['internal_trigger_count'] = self.triggerID
             for attr, value in self.attrs.items():
                 attrs[attr] = value
             for dev in self._devices:
@@ -152,6 +161,15 @@ class Coolector(object):
         """
         self._listen = False
 
+    def __enter__(self):
+        print('In enter')
+        return(self)
+
+    def __exit__(self, type, value, traceback):
+        print('In exit!')
+        for dev in self._devices:
+            dev.disconnect()
+
 
 class Cool_device(object):
     """
@@ -165,13 +183,28 @@ class Cool_device(object):
 
     meta_pvnames = []
     connected_pvs = []
+    data = None
 
-    def set_ready(self, pvn, value):
+    timestamp = 0
+    triggercount = 0
+
+    def get_glob_trigger(self):
+        return(None)
+
+    def set_ready(self, pvn, value, timestamp):
         """
         Mark device as ready for read out, copy data to object.
         This is intended as a callback funtion for a EPICS pv
+
+        This is broken.
         """
-        if(self.is_ready):
+        self.triggercount += 1
+        if(not self.is_ready):
+            print('Got data from ' + self.dev_type + ', aka: ' + str(pvn))
+            self.data = value
+            self.timestamp = timestamp
+        else:
+            # print("New trigger before readout finished! potentially desynced event!")
             warnings.warn("New trigger before readout finished! potentially desynced event!")
             self.potentially_desynced = True
         self.is_ready = True
@@ -183,6 +216,7 @@ class Cool_device(object):
     def is_ready_p(self):
         """ Is the device ready for readout? EPICS devices rely on set_ready callback to set is_ready,
         non epics devices should probably overload """
+        # print(self.dev_type + ' is ready? : ' + str(self.is_ready))
         return(self.is_ready)
 
     def clear(self):
@@ -203,6 +237,8 @@ class Cool_device(object):
         """
         group = h5f.require_group(self.pathname)
         group.attrs['instrument_name'] = self.dev_type
+        group.attrs['timestamp'] = self.timestamp
+        group.attrs['trigger_count'] = self.triggercount
         for pvname in self.meta_pvnames:
             group.attrs[pvname] = epics.caget(pvname)
         group.attrs['Potentially desynced'] = self.potentially_desynced
@@ -215,13 +251,16 @@ class Cool_device(object):
         for pv in pvs:
             self.meta_pvnames.append(prefix + pv)
 
+    def disconnect(self):
+        for pv in self.connected_pvs:
+            pv.disconnect()
+
 
 class Manta_cam(Cool_device):
     """
     Manta camera
     """
     dev_type = 'Manta camera'
-
     def sw_trigger(self):
         """ Set Acquire to True """
         epics.caput(self.port + ':det1:Acquire', 1)
@@ -246,7 +285,6 @@ class Manta_cam(Cool_device):
 
     def __init__(self, port,
                  sw_trig=False,
-                 auto_exposure=False,
                  exposure=None,
                  gain=None,
                  exposure_min=0.0003,
@@ -254,10 +292,6 @@ class Manta_cam(Cool_device):
         """
         Initialize a manta camera
         """
-        # Deal with init arguments
-        self.auto_exposure = auto_exposure
-        if(auto_exposure):
-            print('Auro exposure is slow! May need a couple of seconds between triggers')
         self.exposure_min = exposure_min
         self.exposure_max = exposure_max
         self.port = port
@@ -279,7 +313,7 @@ class Manta_cam(Cool_device):
         # Callback function sets the is_ready flag to True
         pv = epics.PV(self.port + ':image1:ArrayData',
                       auto_monitor=True,
-                      callback=lambda pvn=None, v=None, cv=None, **fw: self.set_ready(pvn, v))
+                      callback=lambda pvname=None, value=None, timestamp=None, **fw: self.set_ready(pvname, value, timestamp))
         self.connected_pvs.append(pv)
 
         # Initialize device
@@ -308,18 +342,55 @@ class Manta_cam(Cool_device):
             self.set_gain(gain)
 
     def write_datasets(self, h5g):
-        data = epics.caget(self.port + ':image1:ArrayData')
-        data = data.reshape(epics.caget(self.port + ':det1:SizeY_RBV'),
-                            epics.caget(self.port + ':det1:SizeX_RBV'))
+        #data = epics.caget(self.port + ':image1:ArrayData')
+        data = self.data.reshape(epics.caget(self.port + ':det1:SizeY_RBV'),
+                                 epics.caget(self.port + ':det1:SizeX_RBV'))
         ds = h5g.create_dataset('data', data=data)
         ds.attrs['pvname'] = self.port + ':image1:ArrayData'
-        # Auto exposure, this should happen after all pvs are written to file
-        if(self.auto_exposure):
+
+    def pv_to_dict(self, dict, pvname):
+        dict[pvname] = epics.caget(pvname)
+
+    def dict_to_pv(self, dict):
+        for pvname, value in dict.items():
+            epics.caput(pvname, value)
+
+    def auto_exposure(self):
+        """ Auto exposure:
+        - Set camera to single exposure modde
+        - Find the correct exposure
+        - Set camera back to initial configuration
+        """
+        continous_p = (epics.caget(self.port + ':det1:Acquire') == 1)
+
+        configuration = {}
+        self.pv_to_dict(configuration, self.port + ':det1:ImageMode')
+        self.pv_to_dict(configuration, self.port + ':det1:TriggerMode')  # Enable trigger mode
+        self.pv_to_dict(configuration, self.port + ':det1:TriggerSelector')  # Enable trigger mode
+        self.pv_to_dict(configuration, self.port + ':det1:TriggerSource')  # Enable trigger mode
+        print(configuration)
+
+        epics.caput(self.port + ':det1:Acquire', 0)
+        epics.caput(self.port + ':det1:TriggerMode', 0)
+        epics.caput(self.port + ':det1:TriggerSource', 0)
+        
+        self.clear()
+        while(True):
+            self.sw_trigger()
+            time.sleep(0.01)
+            data = epics.caget(self.port + ':image1:ArrayData')
+            data = data.reshape(epics.caget(self.port + ':det1:SizeY_RBV'),
+                                epics.caget(self.port + ':det1:SizeX_RBV'))
             sm = scipy.ndimage.filters.median_filter(data, 9).max()
             max_image = 2**12 - 1
             exp = epics.caget(self.port + ':det1:AcquireTime_RBV')
             autoset = exp * (max_image * 0.5)/sm
             self.set_exposure(autoset)
+            if(autoset/exp > 0.5 or autoset/exp < 2.0):
+                return()
+        self.dict_to_pv(configuration)
+        if continous_p:
+            epics.caput(self.port + ':det1:Acquire', 1)
 
 
 class Thorlabs_spectrometer(Cool_device):
@@ -356,7 +427,7 @@ class Thorlabs_spectrometer(Cool_device):
         # Set is_ready to True when there is new data using a callback
         pv = epics.PV(self.port + ':trace1:ArrayData',
                       auto_monitor=True,
-                      callback=lambda pvn=None, v=None, cv=None, **fw: self.set_ready(pvn, v))
+                      callback=lambda pvname=None, value=None, timestamp=None, **fw: self.set_ready(pvname, value, timestamp))
         self.connected_pvs.append(pv)
 
         # Initialize device
@@ -393,15 +464,16 @@ class Thorlabs_spectrometer(Cool_device):
         ds.attrs['pvname'] = pvname
 
         pvname = self.port + ':trace1:ArrayData'
-        ds = h5g.create_dataset('y_data', data=epics.caget(pvname))
+        #ds = h5g.create_dataset('y_data', data=epics.caget(pvname))
+        ds = h5g.create_dataset('y_data', data=self.data)
         ds.attrs['pvname'] = pvname
 
 
-class Picoscope(Cool_device):
+class PicoscopeEpics(Cool_device):
     """
-    Picoscope 4262
+    Picoscope 4262 from EPICS
     """
-    dev_type = 'Thorlabs spectrometer'
+    dev_type = 'PicoScope 4262, EPICS'
 
     def sw_trigger(self): epics.caput(self.port + ':det1:Acquire', 1)
 
@@ -425,7 +497,7 @@ class Picoscope(Cool_device):
         # Set is_ready to True when there is new data using a callback
         pv = epics.PV(self.port + ':trace1:ArrayData',
                       auto_monitor=True,
-                      callback=lambda pvn=None, v=None, cv=None, **fw: self.set_ready(pvn, v))
+                      callback=lambda pvname=None, value=None, timestamp=None, **fw: self.set_ready(pvname, value, timestamp))
         self.connected_pvs.append(pv)
 
         # Initialize device
@@ -454,8 +526,51 @@ class Picoscope(Cool_device):
 
     def write_datasets(self, h5g):
         pvname = self.port + ':trace1:ArrayData'
-        ds = h5g.create_dataset('y_data', data=epics.caget(pvname))
+        ds = h5g.create_dataset('y_data', data=self.data)
         ds.attrs['pvname'] = pvname
+
+
+class PicoscopePython(Cool_device):
+    """
+    Picoscope 4264 from ps4262.py
+    """
+    dev_type = 'PicoScope 4264, python'
+    data = None
+
+    def get_glob_trigger(self):
+        return(self._ps.edgesCaught)
+
+    def __init__(self, voltage_range=5, sampling_interval=1e-6,
+                 capture_duration=0.3, trig_per_min=30):
+        self._ps = ps4262(VRange=voltage_range, requestedSamplingInterval=sampling_interval,
+                          tCapture=capture_duration, triggersPerMinute=trig_per_min)
+        self.pathname = 'data/wavefront/ps4264py/'
+
+    def is_ready_p(self):
+        """If we do not have fresh data, wait for it. If we do, we are ready."""
+        if(not self.is_ready):
+            print('Waiting for picoscope to trigger at ' + str(time.time()))
+            self.triggercount = self._ps.edgesCaught
+            self.data = self._ps.getData()
+            self.timestamp = time.time()
+            print('Got it at ' + str(time.time()))
+            self.is_ready = True
+        return(self.is_ready)
+
+    def write_datasets(self, h5g):
+        h5g.create_dataset('x_data', data=self.data['time'])
+        h5g.create_dataset('y_data', data=self.data['current'])
+
+        for attr, value in self._ps.getMetadata().items():
+            h5g.attrs[attr] = value
+
+    def clear(self):
+        """Should set _ps.data to None"""
+        self.is_ready = False
+        pass
+        
+    def disconnect(self):
+        self._ps.edgeCounterEnabled = False
 
 
 class PM100(Cool_device):
@@ -463,7 +578,7 @@ class PM100(Cool_device):
     Thorlabs PM100USB
     """
     dev_type = 'Thorlabs PM100USB'
-    n_samples = 100
+    n_samples = 500
 
     times = []
 
