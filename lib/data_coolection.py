@@ -37,15 +37,17 @@ class Coolector(object):
                 print(time.time())
                 print("Got one! " + str(trig))
 
-    def stage_scan_n_triggers(self, n, cool_stage, auto_exposure=False, trigger_fun=None):
+    def stage_scan_n_triggers(self, n, cool_stage, auto_exposure=False):
         for sample, position in cool_stage.sample_dict.items():
+            self.sample = sample
             cool_stage.move_stage(sample)
             # Auto exposure
             for dev in self._devices:
-                if trigger_fun:
-                    dev.auto_exposure(trigger_fun)
+                if auto_exposure:
+                    dev.auto_exposure()
                 else:
-                    dev.auto_exposure(dev.sw_trigger())
+                    dev.auto_exposure()
+            # Get triggers
             self.wait_for_n_triggers(n)
 
     def check_if_ready(self):
@@ -69,7 +71,7 @@ class Coolector(object):
         """ Change directory """
         self.directory = dir
 
-    def wait_for_data(self, timeout=30):
+    def wait_for_data(self, timeout=15):
         """
         Wait until all devices are ready, then read them all out.
         """
@@ -80,6 +82,8 @@ class Coolector(object):
                 got_data_p = True
                 break
             if(time.time() - tzero > timeout):
+                for dev in self._devices:
+                    print(dev.dev_type + ' is ready: ' + str(dev.is_ready_p()))
                 print('Timed out while waiting for trigger!')
                 break
             time.sleep(self.pause)
@@ -128,6 +132,7 @@ class Coolector(object):
         """
         Init function. Meta data as mandatory arguments.
         """
+        print('In init!')
         if(not sample and description and directory and sample_uid and location and
            sample_uid and operator and sub_experiment):
             raise Exception('Supply sample, sample_uid, location, operator, \
@@ -181,11 +186,18 @@ class Coolector(object):
         self._listen = False
 
     def __enter__(self):
+        print('In enter!')
+        if(self.directory == '/tmp/'):
+            print('Saving to tmp!!!')
         for dev in self._devices:
             dev.connect()
+        self.clear()
         return(self)
 
     def __exit__(self, type, value, traceback):
+        if(self.directory == '/tmp/'):
+            print('Saving to tmp!!!')
+        print('In exit!')
         for dev in self._devices:
             dev.disconnect()
 
@@ -204,7 +216,8 @@ class Cool_device(object):
     meta_pvnames = None
     connected_pvs = []
     data = None
-
+    attrs = {}
+    
     timestamp = 0
     triggercount = 0
 
@@ -213,16 +226,21 @@ class Cool_device(object):
 
     def connect(self):
         # Set is_ready to True when there is new data using a callback
-        pv = epics.PV(self._callback_pvname,
-                      auto_monitor=True,
-                      callback=lambda pvname=None, value=None, timestamp=None, **fw: self.set_ready(pvname, value, timestamp))
-        self.connected_pvs.append(pv)
+        print('Connecting ' + self.dev_type)
+        if(self._callback_pvname):
+            print('Connecting ' + self._callback_pvname)
+            pv = epics.PV(self._callback_pvname,
+                          auto_monitor=True,
+                          callback=lambda pvname=None, value=None, timestamp=None, **fw: self.set_ready(pvname, value, timestamp))
+            self.connected_pvs.append(pv)
+        return(self)
 
     def disconnect(self):
         for pv in self.connected_pvs:
             pv.disconnect()
+        self.connected_pvs = []
 
-    def auto_exposure(self, trigger_fun):
+    def auto_exposure(self):
         """Do auto exposure. Trigger fun should give a single trigger working with
         the configured device."""
         pass
@@ -235,6 +253,7 @@ class Cool_device(object):
         This is broken.
         """
         self.triggercount += 1
+        print('Getting data to callback! ' + self.dev_type)
         if(not self.is_ready):
             # print('Got data from ' + self.dev_type + ', aka: ' + str(pvn))
             self.data = value
@@ -245,7 +264,7 @@ class Cool_device(object):
             self.potentially_desynced = True
         self.is_ready = True
 
-    def sw_trigger():
+    def sw_trigger(self):
         """ Pass a SW trigger to the device """
         pass
 
@@ -280,6 +299,8 @@ class Cool_device(object):
             for pvname in self.meta_pvnames:
                 # print('Printing ' + pvname + ' to group ' + self.pathname)
                 group.attrs[pvname] = epics.caget(pvname)
+        for key, value in self.attrs.items():
+            group.attrs[key] = value
         group.attrs['Potentially desynced'] = self.potentially_desynced
         self.write_datasets(group)
 
@@ -290,16 +311,13 @@ class Cool_device(object):
         for pv in pvs:
             self.meta_pvnames.append(prefix + pv)
 
-    def disconnect(self):
-        for pv in self.connected_pvs:
-            pv.disconnect()
-
 
 class Manta_cam(Cool_device):
     """
     Manta camera
     """
     dev_type = 'Manta camera'
+
     def sw_trigger(self):
         """ Set Acquire to True """
         epics.caput(self.port + ':det1:Acquire', 1)
@@ -391,18 +409,20 @@ class Manta_cam(Cool_device):
         for pvname, value in dict.items():
             epics.caput(pvname, value)
 
-    def auto_exposure(self, trigger_fun):
+    def auto_exposure(self):
         """ Auto exposure:
         - Set camera to single exposure modde
         - Find the correct exposure
         - Set camera back to initial configuration
         """
+        print('Camera auto exposure!')
         self.connect()
-        trigger_fun()
         while(True):
-            trigger_fun()
+            while(True):
+                if(self.is_ready):
+                    break
+                time.sleep(0.001)
             exp = epics.caget(self.port + ':det1:AcquireTime_RBV')
-            time.sleep(0.2 + exp)
             data = epics.caget(self.port + ':image1:ArrayData')
             data = data.reshape(epics.caget(self.port + ':det1:SizeY_RBV'),
                                 epics.caget(self.port + ':det1:SizeX_RBV'))
@@ -411,7 +431,9 @@ class Manta_cam(Cool_device):
             exp = epics.caget(self.port + ':det1:AcquireTime_RBV')
             autoset = exp * (max_image * 0.5)/sm
             self.set_exposure(autoset)
+            self.clear()
             if(autoset/exp > 0.5 or autoset/exp < 2.0):
+                self.disconnect()
                 return()
 
 
@@ -585,8 +607,8 @@ class PicoscopePython(Cool_device):
         self.is_ready = False
         pass
 
-    def disconnect(self):
-        self._ps.edgeCounterEnabled = False
+    # def disconnect(self):
+    #     self._ps.edgeCounterEnabled = False
 
 
 class LinearStage(Cool_device):
@@ -612,8 +634,11 @@ class LinearStage(Cool_device):
     def write_datasets(self, h5g):
         h5g.attrs['Current_position'] = self.pos
         h5g.attrs['Current_sample'] = self.sample_name
-        for sample, pos in self.sample_dict:
+        for sample, pos in self.sample_dict.items():
             h5g.attrs[sample] = pos
+
+    def is_ready_p(self):
+        return(True)
 
 
 class SuperCool(Cool_device):
