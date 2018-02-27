@@ -83,7 +83,7 @@ class Coolector(object):
         for dev in self._devices:
             glob_trig = dev.get_glob_trigger()
             if(glob_trig):
-                print('Setting global trigger to ' + str(glob_trig))
+                # print('Setting global trigger to ' + str(glob_trig))
                 trigger = glob_trig
 
         timestamp = time.time()
@@ -181,7 +181,7 @@ class Cool_device(object):
     is_ready = False  # Flag that should be set to true when the device is ready for read out.
     potentially_desynced = False  # Did we recieve seceral triggers before writing finished?
 
-    meta_pvnames = []
+    meta_pvnames = None
     connected_pvs = []
     data = None
 
@@ -200,12 +200,12 @@ class Cool_device(object):
         """
         self.triggercount += 1
         if(not self.is_ready):
-            print('Got data from ' + self.dev_type + ', aka: ' + str(pvn))
+            # print('Got data from ' + self.dev_type + ', aka: ' + str(pvn))
             self.data = value
             self.timestamp = timestamp
         else:
-            # print("New trigger before readout finished! potentially desynced event!")
-            warnings.warn("New trigger before readout finished! potentially desynced event!")
+            print(self.dev_type + ": New trigger before readout finished! potentially desynced event!")
+            # warnings.warn("New trigger before readout finished! potentially desynced event!")
             self.potentially_desynced = True
         self.is_ready = True
 
@@ -239,8 +239,11 @@ class Cool_device(object):
         group.attrs['instrument_name'] = self.dev_type
         group.attrs['timestamp'] = self.timestamp
         group.attrs['trigger_count'] = self.triggercount
-        for pvname in self.meta_pvnames:
-            group.attrs[pvname] = epics.caget(pvname)
+        print(self.dev_type + ' has seen ' + str(self.triggercount) + ' triggers')
+        if self.meta_pvnames:
+            for pvname in self.meta_pvnames:
+                # print('Printing ' + pvname + ' to group ' + self.pathname)
+                group.attrs[pvname] = epics.caget(pvname)
         group.attrs['Potentially desynced'] = self.potentially_desynced
         self.write_datasets(group)
 
@@ -298,6 +301,7 @@ class Manta_cam(Cool_device):
         self.pathname = 'data/images/' + port + '/'
 
         # PVs that will be dumped to file
+        self.meta_pvnames = []
         self.pv_to_hdf5(self.port,
                         ':det1:SizeX_RBV',
                         ':det1:SizeY_RBV',
@@ -342,10 +346,10 @@ class Manta_cam(Cool_device):
             self.set_gain(gain)
 
     def write_datasets(self, h5g):
-        #data = epics.caget(self.port + ':image1:ArrayData')
+        # data = epics.caget(self.port + ':image1:ArrayData')
         data = self.data.reshape(epics.caget(self.port + ':det1:SizeY_RBV'),
                                  epics.caget(self.port + ':det1:SizeX_RBV'))
-        ds = h5g.create_dataset('data', data=data)
+        ds = h5g.create_dataset('data', data=data, compression='gzip')
         ds.attrs['pvname'] = self.port + ':image1:ArrayData'
 
     def pv_to_dict(self, dict, pvname):
@@ -418,6 +422,7 @@ class Thorlabs_spectrometer(Cool_device):
         self.arraydatapv = port + ':trace1:ArrayData'
 
         # PVs that will be dumped to file
+        self.meta_pvnames = []
         self.pv_to_hdf5(self.port,
                         ':det1:AcquireTime_RBV',
                         ':det1:Manufacturer_RBV',
@@ -486,6 +491,7 @@ class PicoscopeEpics(Cool_device):
         self.arraydatapv = port + ':trace1:ArrayData'
 
         # PVs that will be dumped to file
+        self.meta_pvnames = []
         self.pv_to_hdf5(self.port,
                         ':det1:Serial_RBV',
                         # ':det1:Manufacturer_RBV',
@@ -542,6 +548,7 @@ class PicoscopePython(Cool_device):
 
     def __init__(self, voltage_range=5, sampling_interval=1e-6,
                  capture_duration=0.3, trig_per_min=30):
+        self.sampling_interval = sampling_interval
         self._ps = ps4262(VRange=voltage_range, requestedSamplingInterval=sampling_interval,
                           tCapture=capture_duration, triggersPerMinute=trig_per_min)
         self.pathname = 'data/wavefront/ps4264py/'
@@ -549,18 +556,17 @@ class PicoscopePython(Cool_device):
     def is_ready_p(self):
         """If we do not have fresh data, wait for it. If we do, we are ready."""
         if(not self.is_ready):
-            print('Waiting for picoscope to trigger at ' + str(time.time()))
+            # print('Waiting for picoscope to trigger at ' + str(time.time()))
             self.triggercount = self._ps.edgesCaught
             self.data = self._ps.getData()
-            self.timestamp = time.time()
+            self.timestamp = self.data['timestamp']
             print('Got it at ' + str(time.time()))
             self.is_ready = True
         return(self.is_ready)
 
     def write_datasets(self, h5g):
-        h5g.create_dataset('x_data', data=self.data['time'])
-        h5g.create_dataset('y_data', data=self.data['current'])
-
+        h5g.create_dataset('x_data', data=self.data['time'], compression='gzip')
+        h5g.create_dataset('y_data', data=self.data['current'], compression='gzip')
         for attr, value in self._ps.getMetadata().items():
             h5g.attrs[attr] = value
 
@@ -568,9 +574,53 @@ class PicoscopePython(Cool_device):
         """Should set _ps.data to None"""
         self.is_ready = False
         pass
-        
+
     def disconnect(self):
         self._ps.edgeCounterEnabled = False
+
+
+class SuperCool(Cool_device):
+    dev_type = 'LairdTech temperature regulator'
+
+    def __init__(self):
+        self.triggercount = 0
+        self.port = 'LT59'
+        self.pathname = 'data/temperature/LT59/'
+        epics.caput('LT59:Retrieve', 1)
+        # epics.caput('LT59:Temp1Mode', 1)
+        # epics.caput('LT59:Temp1CoeffA', 3.9083E-3)
+        # epics.caput('LT59:Temp1CoeffB', -5.7750E-7)
+        # epics.caput('LT59:Temp1CoeffC', 1000)
+        # epics.caput('LT59:Mode', 6)
+        # epics.caput('LT59:Send', 1)
+
+    def write_datasets(self, h5g):
+        epics.caput('LT59:Retrieve', 1)
+        time.sleep(0.01)
+        for pvname in ['LT59:Temp1Mode',
+                       'LT59:Temp1CoeffA_RBV',
+                       'LT59:Temp1CoeffB_RBV',
+                       'LT59:Temp1CoeffC_RBV',
+                       'LT59:Mode_RBV',
+                       'LT59:Temp1_RBV',
+                       'LT59:StartStop_RBV']:
+            h5g.attrs[pvname] = epics.caget(pvname)
+        print('T = ' + str(epics.caget('LT59:Temp1_RBV')))
+
+    def print_info(self):
+        epics.caput('LT59:Retrieve', 1)
+        for pvname in ['LT59:Temp1Mode',
+                       'LT59:Temp1CoeffA',
+                       'LT59:Temp1CoeffB',
+                       'LT59:Temp1CoeffC',
+                       'LT59:Mode_RBV',
+                       'LT59:Temp1_RBV',
+                       'LT59:StartStop_RBV']:
+            print(pvname + ' ' + str(epics.caget(pvname)))
+
+    def is_ready_p(self):
+        self.timestamp = time.time()
+        return(True)
 
 
 class PM100(Cool_device):

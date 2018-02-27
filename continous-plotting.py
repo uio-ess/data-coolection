@@ -1,4 +1,4 @@
-import lib.data_coolection as cool
+import data_coolection as cool
 import h5py
 import matplotlib.pyplot as plt
 
@@ -12,14 +12,14 @@ c = cool.Coolector(sample='Dummy',
                    sub_experiment='NA',
                    directory='/tmp/')
 # Add devices
-cam = cool.Manta_cam('CAM1', sw_trig=True, exposure=0.0010, gain=0, exposure_max=0.4)
+cam = cool.Manta_cam('CAM1', sw_trig=True, exposure=0.0080, gain=0, exposure_max=0.4)
 c.add_device(cam)
 
 plt.ion()
 # plt.colorbar(0, 4096)
 fig = plt.figure()
 
-cam.auto_exposure()
+# cam.auto_exposure()
 
 while(True):
     c.sw_trigger()
