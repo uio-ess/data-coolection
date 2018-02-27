@@ -29,6 +29,25 @@ class Coolector(object):
 
     latest_file_name = None
 
+    def wait_for_n_triggers(self, n):
+        with self as c:
+            for trig in range(n):
+                print('Waiting for data!')
+                c.wait_for_data()
+                print(time.time())
+                print("Got one! " + str(trig))
+
+    def stage_scan_n_triggers(self, n, cool_stage, auto_exposure=False, trigger_fun=None):
+        for sample, position in cool_stage.sample_dict.items():
+            cool_stage.move_stage(sample)
+            # Auto exposure
+            for dev in self._devices:
+                if trigger_fun:
+                    dev.auto_exposure(trigger_fun)
+                else:
+                    dev.auto_exposure(dev.sw_trigger())
+            self.wait_for_n_triggers(n)
+
     def check_if_ready(self):
         """
         Are all devices ready for ready out?
@@ -203,6 +222,11 @@ class Cool_device(object):
         for pv in self.connected_pvs:
             pv.disconnect()
 
+    def auto_exposure(self, trigger_fun):
+        """Do auto exposure. Trigger fun should give a single trigger working with
+        the configured device."""
+        pass
+
     def set_ready(self, pvn, value, timestamp):
         """
         Mark device as ready for read out, copy data to object.
@@ -367,29 +391,18 @@ class Manta_cam(Cool_device):
         for pvname, value in dict.items():
             epics.caput(pvname, value)
 
-    def auto_exposure(self):
+    def auto_exposure(self, trigger_fun):
         """ Auto exposure:
         - Set camera to single exposure modde
         - Find the correct exposure
         - Set camera back to initial configuration
         """
-        continous_p = (epics.caget(self.port + ':det1:Acquire') == 1)
-
-        configuration = {}
-        self.pv_to_dict(configuration, self.port + ':det1:ImageMode')
-        self.pv_to_dict(configuration, self.port + ':det1:TriggerMode')  # Enable trigger mode
-        self.pv_to_dict(configuration, self.port + ':det1:TriggerSelector')  # Enable trigger mode
-        self.pv_to_dict(configuration, self.port + ':det1:TriggerSource')  # Enable trigger mode
-        print(configuration)
-
-        epics.caput(self.port + ':det1:Acquire', 0)
-        epics.caput(self.port + ':det1:TriggerMode', 0)
-        epics.caput(self.port + ':det1:TriggerSource', 0)
-        
-        self.clear()
+        self.connect()
+        trigger_fun()
         while(True):
-            self.sw_trigger()
-            time.sleep(0.01)
+            trigger_fun()
+            exp = epics.caget(self.port + ':det1:AcquireTime_RBV')
+            time.sleep(0.2 + exp)
             data = epics.caget(self.port + ':image1:ArrayData')
             data = data.reshape(epics.caget(self.port + ':det1:SizeY_RBV'),
                                 epics.caget(self.port + ':det1:SizeX_RBV'))
@@ -400,9 +413,6 @@ class Manta_cam(Cool_device):
             self.set_exposure(autoset)
             if(autoset/exp > 0.5 or autoset/exp < 2.0):
                 return()
-        self.dict_to_pv(configuration)
-        if continous_p:
-            epics.caput(self.port + ':det1:Acquire', 1)
 
 
 class Thorlabs_spectrometer(Cool_device):
@@ -604,6 +614,7 @@ class LinearStage(Cool_device):
         h5g.attrs['Current_sample'] = self.sample_name
         for sample, pos in self.sample_dict:
             h5g.attrs[sample] = pos
+
 
 class SuperCool(Cool_device):
     dev_type = 'LairdTech temperature regulator'
