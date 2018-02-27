@@ -4,7 +4,7 @@ import threading
 import time
 import numpy
 import scipy.ndimage
-import warnings
+import moveStage
 import numbers
 from ps4262 import ps4262
 
@@ -577,6 +577,24 @@ class PicoscopePython(Cool_device):
 
     def disconnect(self):
         self._ps.edgeCounterEnabled = False
+
+
+class LinearStage(Cool_device):
+    """ Code for setting up, reading position and moving the linear stage """
+    dev_type = 'Standa linear stage'
+
+    def __init__(self):
+        self.pathname = 'data/linearstage/standa/'
+        self.position = moveStage.get_position()
+        moveStage.set_power_off_delay(0)
+
+    def move_stage(self, pos):
+        self.pos = pos
+        moveStage.move_to(pos)
+        time.sleep(0.1)
+
+    def write_datasets(self, h5g):
+        h5g.attrs['Position'] = self.pos
 
 
 class SuperCool(Cool_device):
