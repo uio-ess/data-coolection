@@ -587,15 +587,23 @@ class LinearStage(Cool_device):
         self.pathname = 'data/linearstage/standa/'
         self.position = moveStage.get_position()
         moveStage.set_power_off_delay(0)
+        self.sample_dict = {}
+        self.sample_name = None
+        
+    def add_sample(self, name, position):
+        self.sample_dict[name] = position
 
-    def move_stage(self, pos):
-        self.pos = pos
-        moveStage.move_to(pos)
+    def move_stage(self, sample):
+        self.pos = self.sample_dict[sample]
+        self.sample_name = sample
+        moveStage.move_to(self.pos)
         time.sleep(0.1)
 
     def write_datasets(self, h5g):
-        h5g.attrs['Position'] = self.pos
-
+        h5g.attrs['Current_position'] = self.pos
+        h5g.attrs['Current_sample'] = self.sample_name
+        for sample, pos in self.sample_dict:
+            h5g.attrs[sample] = pos
 
 class SuperCool(Cool_device):
     dev_type = 'LairdTech temperature regulator'
