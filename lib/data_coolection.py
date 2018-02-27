@@ -162,11 +162,11 @@ class Coolector(object):
         self._listen = False
 
     def __enter__(self):
-        print('In enter')
+        for dev in self._devices:
+            dev.connect()
         return(self)
 
     def __exit__(self, type, value, traceback):
-        print('In exit!')
         for dev in self._devices:
             dev.disconnect()
 
@@ -180,6 +180,7 @@ class Cool_device(object):
     dev_type = None  # Descriptor for the device.
     is_ready = False  # Flag that should be set to true when the device is ready for read out.
     potentially_desynced = False  # Did we recieve seceral triggers before writing finished?
+    _callback_pvname = None
 
     meta_pvnames = None
     connected_pvs = []
@@ -190,6 +191,17 @@ class Cool_device(object):
 
     def get_glob_trigger(self):
         return(None)
+
+    def connect(self):
+        # Set is_ready to True when there is new data using a callback
+        pv = epics.PV(self._callback_pvname,
+                      auto_monitor=True,
+                      callback=lambda pvname=None, value=None, timestamp=None, **fw: self.set_ready(pvname, value, timestamp))
+        self.connected_pvs.append(pv)
+
+    def disconnect(self):
+        for pv in self.connected_pvs:
+            pv.disconnect()
 
     def set_ready(self, pvn, value, timestamp):
         """
@@ -313,12 +325,8 @@ class Manta_cam(Cool_device):
                         ':det1:NumImagesCounter_RBV',
                         ':det1:DataType_RBV')
 
-        # When port + :image1:ArrayData has new data, we are ready for read out
-        # Callback function sets the is_ready flag to True
-        pv = epics.PV(self.port + ':image1:ArrayData',
-                      auto_monitor=True,
-                      callback=lambda pvname=None, value=None, timestamp=None, **fw: self.set_ready(pvname, value, timestamp))
-        self.connected_pvs.append(pv)
+        # PV name that will get callback funtion attached
+        self._callback_pvname = self.port + ':image1:ArrayData'
 
         # Initialize device
         for pvname, value in {':image1:EnableCallbacks': 1,  # Enable
@@ -429,11 +437,7 @@ class Thorlabs_spectrometer(Cool_device):
                         ':det1:NumImagesCounter_RBV',
                         ':det1:Model_RBV')
 
-        # Set is_ready to True when there is new data using a callback
-        pv = epics.PV(self.port + ':trace1:ArrayData',
-                      auto_monitor=True,
-                      callback=lambda pvname=None, value=None, timestamp=None, **fw: self.set_ready(pvname, value, timestamp))
-        self.connected_pvs.append(pv)
+        self._callback_pvname = self.port + ':trace1:ArrayData'
 
         # Initialize device
         for pvname, value in {':det1:TlAcquisitionType': 0,  # 1 is processed, set to 0 for raw
@@ -500,11 +504,7 @@ class PicoscopeEpics(Cool_device):
                         ':det1:DataType_RBV',
                         ':det1:ArrayCounter_RBV')
 
-        # Set is_ready to True when there is new data using a callback
-        pv = epics.PV(self.port + ':trace1:ArrayData',
-                      auto_monitor=True,
-                      callback=lambda pvname=None, value=None, timestamp=None, **fw: self.set_ready(pvname, value, timestamp))
-        self.connected_pvs.append(pv)
+        self._callback_pvname = self.port + ':trace1:ArrayData'
 
         # Initialize device
         for pvname, value in {':trace1:EnableCallbacks': 1,  # Enable
