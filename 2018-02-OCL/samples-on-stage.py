@@ -16,15 +16,15 @@ stage = cool.LinearStage()
 stage.add_sample('HVC1.2', 0)
 stage.add_sample('HV7', 5500)
 # stage.add_device('HV10', 11000)
-# stage.add_device('HVC1', 15000)
+# stage.add_device('HV1', 15000)
 c.add_device(stage)
 
 # Manta camera
 cam = cool.Manta_cam('CAM1',
                      sw_trig=False,
-                     exposure=0.100,
+                     exposure=0.0011,
                      gain=0,
-                     exposure_max=0.4,
+                     exposure_max=0.5,
                      exposure_min=0.001)
 cam.attrs['Distance to camera'] = 118.5
 cam.attrs['Distance units'] = 'cm'
@@ -40,3 +40,4 @@ c.add_device(ps)
 
 # Get 10 triggers on all devices on the stage, with auto exposure for devices that are able
 c.stage_scan_n_triggers(10, stage, auto_exposure=True)
+ps._ps.edgeCounterEnabled = False

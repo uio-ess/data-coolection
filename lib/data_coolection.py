@@ -45,8 +45,6 @@ class Coolector(object):
             for dev in self._devices:
                 if auto_exposure:
                     dev.auto_exposure()
-                else:
-                    dev.auto_exposure()
             # Get triggers
             self.wait_for_n_triggers(n)
 
@@ -213,11 +211,16 @@ class Cool_device(object):
     potentially_desynced = False  # Did we recieve seceral triggers before writing finished?
     _callback_pvname = None
 
-    meta_pvnames = None
-    connected_pvs = []
+    # meta_pvnames = None
+    # connected_pvs = []
     data = None
-    attrs = {}
+    # attrs = {}
     
+    def __init__(self):
+        self.meta_pvnames = []
+        self.connected_pvs = []
+        self.attrs = {}
+
     timestamp = 0
     triggercount = 0
 
@@ -277,6 +280,7 @@ class Cool_device(object):
     def clear(self):
         """ Clear data from device. For EPICS devices, sinply set is_ready to false. """
         self.is_ready = False
+        self.potentially_desynced = False
 
     def write_datasets(self, group):
         """
@@ -349,13 +353,13 @@ class Manta_cam(Cool_device):
         """
         Initialize a manta camera
         """
+        super().__init__()
         self.exposure_min = exposure_min
         self.exposure_max = exposure_max
         self.port = port
         self.pathname = 'data/images/' + port + '/'
 
         # PVs that will be dumped to file
-        self.meta_pvnames = []
         self.pv_to_hdf5(self.port,
                         ':det1:SizeX_RBV',
                         ':det1:SizeY_RBV',
@@ -418,11 +422,10 @@ class Manta_cam(Cool_device):
         print('Camera auto exposure!')
         self.connect()
         while(True):
-            while(True):
-                if(self.is_ready):
-                    break
-                time.sleep(0.001)
+            while(not self.is_ready_p()):
+                time.sleep(0.1)
             exp = epics.caget(self.port + ':det1:AcquireTime_RBV')
+            print('Current exposure: ' + str(exp))
             data = epics.caget(self.port + ':image1:ArrayData')
             data = data.reshape(epics.caget(self.port + ':det1:SizeY_RBV'),
                                 epics.caget(self.port + ':det1:SizeX_RBV'))
@@ -432,9 +435,19 @@ class Manta_cam(Cool_device):
             autoset = exp * (max_image * 0.5)/sm
             self.set_exposure(autoset)
             self.clear()
-            if(autoset/exp > 0.5 or autoset/exp < 2.0):
-                self.disconnect()
-                return()
+            if(autoset > self.exposure_max):
+                print('Exposure set to max!')
+                break
+            if(autoset < self.exposure_min):
+                print('Exposure set to min!')
+                break
+            if(autoset/exp > (1/1.5) and autoset/exp < 1.5):
+                print('New: ' + str(autoset))
+                print('Old: ' + str(exp))
+                print('Leaving auto exposure')
+                break
+        self.disconnect()
+        return()
 
 
 class Thorlabs_spectrometer(Cool_device):
@@ -457,12 +470,12 @@ class Thorlabs_spectrometer(Cool_device):
         """
         Initialize a Thorlabs spectrometer
         """
+        super().__init__()
         self.port = port
         self.pathname = 'data/spectra/' + port + '/'
         self.arraydatapv = port + ':trace1:ArrayData'
 
         # PVs that will be dumped to file
-        self.meta_pvnames = []
         self.pv_to_hdf5(self.port,
                         ':det1:AcquireTime_RBV',
                         ':det1:Manufacturer_RBV',
@@ -522,12 +535,12 @@ class PicoscopeEpics(Cool_device):
         """
         Initialize a picoscope
         """
+        super().__init__()
         self.port = port
         self.pathname = 'data/wavefront/' + port + '/'
         self.arraydatapv = port + ':trace1:ArrayData'
 
         # PVs that will be dumped to file
-        self.meta_pvnames = []
         self.pv_to_hdf5(self.port,
                         ':det1:Serial_RBV',
                         # ':det1:Manufacturer_RBV',
@@ -580,6 +593,7 @@ class PicoscopePython(Cool_device):
 
     def __init__(self, voltage_range=5, sampling_interval=1e-6,
                  capture_duration=0.3, trig_per_min=30):
+        super().__init__()
         self.sampling_interval = sampling_interval
         self._ps = ps4262(VRange=voltage_range, requestedSamplingInterval=sampling_interval,
                           tCapture=capture_duration, triggersPerMinute=trig_per_min)
@@ -616,6 +630,7 @@ class LinearStage(Cool_device):
     dev_type = 'Standa linear stage'
 
     def __init__(self):
+        super().__init__()
         self.pathname = 'data/linearstage/standa/'
         self.position = moveStage.get_position()
         moveStage.set_power_off_delay(0)
@@ -645,6 +660,7 @@ class SuperCool(Cool_device):
     dev_type = 'LairdTech temperature regulator'
 
     def __init__(self):
+        super().__init__()
         self.triggercount = 0
         self.port = 'LT59'
         self.pathname = 'data/temperature/LT59/'
@@ -721,6 +737,7 @@ class PM100(Cool_device):
 
     def __init__(self, port, sw_trig=False):
         """ Initialize pm100 """
+        super().__init__()
         self.port = port
         self.pm_pv = self.port + ':MEAS:POW'
         self.pathname = 'data/powermeter/' + self.port + '/'
@@ -737,27 +754,3 @@ class PM100(Cool_device):
         epics.caput(self.port + ':SENS:CORR:WAV_RBV.PROC', 1)
         time.sleep(0.01)
         super().write(h5f)
-
-
-class RNG(Cool_device):
-    """
-    Print some random numbers to HDF5 as an example of a non epics device
-    """
-    dev_type = 'rng'
-    datavec = None
-
-    def populate(self):
-        """ Some thing must set self.is_ready to true when device is ready for readout """
-        self.datavec = numpy.random.rand(100)
-        self.is_ready = True
-
-    def sw_trigger(self):
-        if(not self.is_ready):
-            threading.Thread(target=self.populate, args=()).start()
-
-    def __init__(self, port, sw_trig=False):
-        self.port = port
-        self.pathname = 'data/rng/' + self.port + '/'
-
-    def write_datasets(self, h5g):
-        h5g.create_dataset('y_values', data=self.datavec)
