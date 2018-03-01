@@ -40,6 +40,7 @@ class Coolector(object):
     def stage_scan_n_triggers(self, n, cool_stage, auto_exposure=False):
         for sample, position in cool_stage.sample_dict.items():
             self.sample = sample
+            self.attrs['sample_name'] = sample
             cool_stage.move_stage(sample)
             # Auto exposure
             for dev in self._devices:
@@ -592,7 +593,7 @@ class PicoscopePython(Cool_device):
         return(self._ps.edgesCaught)
 
     def __init__(self, voltage_range=5, sampling_interval=1e-6,
-                 capture_duration=0.3, trig_per_min=30):
+                 capture_duration=0.66, trig_per_min=30):
         super().__init__()
         self.sampling_interval = sampling_interval
         self._ps = ps4262(VRange=voltage_range, requestedSamplingInterval=sampling_interval,
@@ -632,7 +633,7 @@ class LinearStage(Cool_device):
     def __init__(self):
         super().__init__()
         self.pathname = 'data/linearstage/standa/'
-        self.position = moveStage.get_position()
+        self.pos = moveStage.get_position()
         moveStage.set_power_off_delay(0)
         self.sample_dict = {}
         self.sample_name = None
