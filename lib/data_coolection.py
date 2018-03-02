@@ -35,8 +35,8 @@ class Dataset(object):
 
     def write(self, h5g):
         data = val_or_retval(self.data)
-        ds = h5g.write_datasets(self.dsname, data=data, compression='gzip')
-        for key, value in self.attrs:
+        ds = h5g.create_dataset(self.dsname, data=data, compression='gzip')
+        for key, value in self.attrs.items():
             ds.attrs[key] = val_or_retval(value)
 
 
@@ -54,11 +54,18 @@ class Savedata(object):
     def write(self, h5f):
         h5g = h5f.require_group(self.groupname)
         # Group attributes
+        print(self.groupname)
         for key, val in self.attrs.items():
+            # print(str(key) + ': ' + str(val_or_retval(val)) + ':' + str(val))
             h5g.attrs[key] = val_or_retval(val)
         # Datasets
         for dataset in self.datasets:
             dataset.write(h5g)
+
+    def write_additional_meta(self, h5f, dict):
+        h5g = h5f.require_group(self.groupname)
+        for key, val in dict.items():
+            h5g.attrs[key] = val
 
 
 class Coolector(object):
@@ -157,6 +164,19 @@ class Coolector(object):
         for dev in self._devices:
             dev.sw_trigger()
 
+    def hw_trigger(self):
+        """
+        Send SW trigger to all connected devices
+        """
+        triggers = 0
+        for dev in self._devices:
+            if(dev.hw_trigger()):
+                triggers = triggers + 1
+        if triggers == 0:
+            print('Found no devices avble to send a HW trigger')
+        if triggers > 1:
+            print('Several trigger generators attached')
+
     def write(self, trigger):
         """
         Write meta data + device data for all connected devices
@@ -205,9 +225,13 @@ class Coolector(object):
             dev.disconnect()
 
     # Scans
-    def wait_for_n_triggers(self, n):
+    def wait_for_n_triggers(self, n, SW_trigger=False):
         with self as c:
             for trig in range(n):
+                if(SW_trigger):
+                    self.sw_trigger()
+                else:
+                    self.hw_trigger()
                 print('Waiting for data!')
                 c.wait_for_data()
                 print(time.time())
@@ -245,8 +269,8 @@ class Cool_device(object):
         self.dev_type = dev_type  # Descriptor for the device.
 
         self.savedata = Savedata(pathname, dev_type)
-        self.savedata.attrs['timestamp'] = lambda: self.timestamp()
-        self.savedata.attrs['trigger_count'] = lambda: self.triggercount()
+        self.savedata.attrs['timestamp'] = lambda: self.timestamp
+        self.savedata.attrs['trigger_count'] = lambda: self.triggercount
         self.savedata.attrs['Potentially desynced'] = lambda: self.potentially_desynced
 
     def get_glob_trigger(self):
@@ -296,6 +320,10 @@ class Cool_device(object):
         """ Pass a SW trigger to the device """
         pass
 
+    def hw_trigger(self):
+        """ Pass a SW trigger to the device """
+        pass
+
     def is_ready_p(self):
         """ Is the device ready for readout? EPICS devices rely on set_ready callback to set is_ready,
         non epics devices should probably overload """
@@ -314,16 +342,18 @@ class Cool_device(object):
 
         Overload if stuff needs to happen before write
         """
-        self.savedata.write()
+        self.savedata.write(h5f)
 
     def pv_to_attribute(self, prefix, *pvs):
         """
         Read pv values to attributes when needed
         """
         for pv in pvs:
-            pvname = prefix + pv
-            self.savedata.attrs[pvname] = lambda: epics.caget(pvname)
-
+            print(prefix + pv)
+            self.savedata.attrs[prefix + pv] = lambda: epics.caget(prefix + pv)
+        for pv in pvs:
+            print(self.savedata.attrs[prefix + pv]())
+        
 
 class Manta_cam(Cool_device):
     """
@@ -397,19 +427,20 @@ class Manta_cam(Cool_device):
             self.set_exposure(exposure)
         if(isinstance(gain, numbers.Number)):  # We must be able to set this to 0
             self.set_gain(gain)
-        
+
         # Setting up data saving
         # Metadata that will be dumped to device
-        self.pv_to_attribute(self.port,
-                             ':det1:SizeX_RBV',
-                             ':det1:SizeY_RBV',
-                             ':det1:Manufacturer_RBV',
-                             ':det1:Model_RBV',
-                             ':det1:AcquireTime_RBV',
-                             ':det1:Gain_RBV',
-                             ':det1:LEFTSHIFT_RBV',
-                             ':det1:NumImagesCounter_RBV',
-                             ':det1:DataType_RBV')
+        sda = self.savedata.attrs
+        sda[port + ':det1:SizeX_RBV'] = lambda: epics.caget(port + ':det1:SizeX_RBV')
+
+        sda[port + ':det1:SizeY_RBV'] = lambda: epics.caget(port + ':det1:SizeY_RBV')
+        sda[port + ':det1:Manufacturer_RBV'] = lambda: epics.caget(port + ':det1:Manufacturer_RBV')
+        sda[port + ':det1:Model_RBV'] = lambda: epics.caget(port + ':det1:Model_RBV')
+        sda[port + ':det1:AcquireTime_RBV'] = lambda: epics.caget(port + ':det1:AcquireTime_RBV')
+        sda[port + ':det1:Gain_RBV'] = lambda: epics.caget(port + ':det1:Gain_RBV')
+        sda[port + ':det1:LEFTSHIFT_RBV'] = lambda: epics.caget(port + ':det1:LEFTSHIFT_RBV')
+        sda[port + ':det1:NumImagesCounter_RBV'] = lambda: epics.caget(port + ':det1:NumImagesCounter_RBV')
+        sda[port + ':det1:DataType_RBV'] = lambda: epics.caget(port + ':det1:DataType_RBV')
         
         ds = Dataset('data', lambda: self.get_reshaped_data())
         ds.attrs['pvname'] = self._callback_pvname
@@ -476,16 +507,14 @@ class Thorlabs_spectrometer(Cool_device):
         super().__init__(port,
                          'data/spectra/' + port + '/',
                          self.dev_type,
-                         self.port + ':trace1:ArrayData')
+                         port + ':trace1:ArrayData')
 
         # Initialize device
         for pvname, value in {':det1:TlAcquisitionType': 0,  # 1 is processed, set to 0 for raw
                               ':trace1:EnableCallbacks': 1,  # Enable
                               ':trace1:ArrayCallbacks': 1,  # Enable
                               ':det1:TlAmplitudeDataTarget': 2,  # Thorlabs
-                              ':det1:TlWavelengthDataTarget': 0,  # Factory
-                              ':det1:TlAmplitudeDataGet': 1,  # Get amplitudes
-                              ':det1:TlWavelengthDataGet': 1}.items():  # Get waves
+                              ':det1:TlWavelengthDataTarget': 0}.items():  # Factory
             epics.caput(port + pvname, value)
         if(sw_trig):
             for pvname, value in {':det1:ImageMode': 0,  # Single
@@ -498,81 +527,104 @@ class Thorlabs_spectrometer(Cool_device):
                 epics.caput(port + pvname, value)
             epics.caput(port + ':det1:Acquire', 1)
 
+        epics.caput(port + ':det1:TlAmplitudeDataGet', 1)  # Get amplitudes
+        epics.caput(port + ':det1:TlWavelengthDataGet', 1)  # Get waves
+
         # Set exposure from argument
         if(exposure):
             self.set_exposure(exposure)
 
-        # Set up data for saving
-        self.savedata = Savedata(self.pathname, self.dev_type)
-        # PVs that will be dumped to file
-        self.pv_to_attribute(self.port,
-                             ':det1:AcquireTime_RBV',
-                             ':det1:Manufacturer_RBV',
-                             ':det1:NumImagesCounter_RBV',
-                             ':det1:Model_RBV')
+        sda = self.savedata.attrs
+        sda[port + ':det1:AcquireTime_RBV'] = lambda: epics.caget(port + ':det1:AcquireTime_RBV')
+        sda[port + ':det1:NumImagesCounter_RBV'] = lambda: epics.caget(port + ':det1:NumImagesCounter_RBV')
+        sda[port + ':det1:Model_RBV'] = epics.caget(self.port + ':det1:Model_RBV')
+        sda[port + ':det1:Manufacturer_RBV'] = epics.caget(port + ':det1:Manufacturer_RBV')
 
         # Data sets
-        pvname = port + ':det1:TlWavelengthData_RBV'
-        x_data = Dataset('x_values', lambda: epics.caget(pvname))
-        x_data.attrs['pvname'] = pvname
+        pv1 = port + ':det1:TlWavelengthData_RBV'
+        x_data = Dataset('x_values', lambda: epics.caget(pv1))
+        x_data.attrs['pvname'] = pv1
         x_data.attrs['label'] = 'Wavelength'
         x_data.attrs['unit'] = 'nm'
         self.savedata.add_dataset(x_data)
 
-        pvname = port + ':trace1:ArrayData'
+        pv2 = port + ':trace1:ArrayData'
         y_data = Dataset('y_values', lambda: self.data)
-        y_data.attrs['pvname'] = pvname
+        y_data.attrs['pvname'] = pv2
         y_data.attrs['label'] = 'Intensity'
         y_data.attrs['unit'] = 'Counts'
         self.savedata.add_dataset(y_data)
 
-        pvname = self.port + ':det1:TlAmplitudeData_RBV'
-        scale_data = Dataset('y_scale', lambda: epics.caget())
-        scale_data.attrs['pvname'] = pvname
+        pv3 = self.port + ':det1:TlAmplitudeData_RBV'
+        scale_data = Dataset('y_scale', lambda: epics.caget(pv3))
+        scale_data.attrs['pvname'] = pv3
         scale_data.attrs['label'] = 'Correction'
         scale_data.attrs['unit'] = 'Scale factor'
         self.savedata.add_dataset(scale_data)
 
 
-# class PicoscopePython(Cool_device):
-#     """
-#     Picoscope 4264 from ps4262.py
-#     """
-#     dev_type = 'PicoScope 4264, python'
-#     data = None
+class PicoscopePython(Cool_device):
+    """
+    Picoscope 4264 from ps4262.py
+    """
+    dev_type = 'PicoScope 4264, python'
+    data = None
 
-#     def get_glob_trigger(self):
-#         return(self._ps.edgesCaught)
+    def get_glob_trigger(self):
+        # Get trigger number for last caught trigger
+        return(self.triggercount)
 
-#     def __init__(self, voltage_range=5, sampling_interval=1e-6,
-#                  capture_duration=0.66, trig_per_min=30):
-#         super().__init__()
-#         self.sampling_interval = sampling_interval
-#         self._ps = ps4262(VRange=voltage_range, requestedSamplingInterval=sampling_interval,
-#                           tCapture=capture_duration, triggersPerMinute=trig_per_min)
-#         self.pathname = 'data/wavefront/ps4264py/'
+    def __init__(self, voltage_range=5, sampling_interval=1e-6,
+                 capture_duration=0.66, trig_per_min=30):
+        super().__init__('ps4264', 'data/wavefront/ps4264py/', self.dev_type, None)
+        self._ps = ps4262(VRange=voltage_range, requestedSamplingInterval=sampling_interval,
+                          tCapture=capture_duration, triggersPerMinute=trig_per_min)
+        # Configuring data for saving
+        current = Dataset('y_data', lambda: self.data['current'])
+        current.attrs['label'] = 'Current'
+        current.attrs['unit'] = 'A'
+        self.savedata.add_dataset(current)
+        # Lambdas kalled during write(), queue should be 0
+        self.potentially_desynced = len(self._ps.data) > 0
+        self.savedata.attrs['Queue length'] = lambda: len(self._ps.data)
+        self.metadata = {}
 
-#     def is_ready_p(self):
-#         """If we do not have fresh data, wait for it. If we do, we are ready."""
-#         if(not self.is_ready):
-#             # print('Waiting for picoscope to trigger at ' + str(time.time()))
-#             self.triggercount = self._ps.edgesCaught
-#             self.data = self._ps.getData()
-#             self.timestamp = self.data['timestamp']
-#             print('Got it at ' + str(time.time()))
-#             self.is_ready = True
-#         return(self.is_ready)
+    def write(self, h5f):
+        super().write(h5f)
+        self.savedata.write_additional_meta(h5f, self.metadata)
 
-#     def write_datasets(self, h5g):
-#         h5g.create_dataset('x_data', data=self.data['time'], compression='gzip')
-#         h5g.create_dataset('y_data', data=self.data['current'], compression='gzip')
-#         for attr, value in self._ps.getMetadata().items():
-#             h5g.attrs[attr] = value
+    def is_ready_p(self):
+        """If we do not have fresh data, wait for it. If we do, we are ready."""
+        if(self.is_ready):
+            return(True)
+        if(len(self._ps.data) > 0):
+            self.data = self._ps.data.popleft()
+            self.timestamp = self.data['timestamp']
+            self.triggercount = self._ps.edgesCaught
+            self.is_ready = True
+            self.metadata = self._ps.getMetadata()
+        return(self.is_ready)
 
-#     def clear(self):
-#         """Should set _ps.data to None"""
-#         self.is_ready = False
-#         pass
+    def clear(self):
+        """Should set _ps.data to None"""
+        self.is_ready = False
+        self._ps.data.clear()
+        pass
+
+    def sampling(self, sampling_interval, duration):
+        """ Hor long, and at what frequency, will the recorded waveforms be? """
+        self._ps.setTimeBase(requestedSamplingInterval=sampling_interval,
+                             tCapture=duration)
+
+    def triggers_per_minute(self, tpm):
+        """ Set tmp to 0 for single pulse generation """
+        self._ps.setFGrn(triggersPerMinute=tpm)
+
+    def hw_trigger(self):
+        print('PS will send it!')
+        self._ps.setFGen(triggersPerMinute=-1)
+        time.sleep(0.05)  # Should not ask for triggers to fast
+        return(True)
 
 
 class LinearStage(Cool_device):
