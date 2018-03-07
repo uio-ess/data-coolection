@@ -78,29 +78,30 @@ class Coolector(object):
 
     latest_file_name = None
 
-    def __init__(self, sample=None, sample_uid=None, location=None, operator=None,
+    def __init__(self, session=None, sample=None, sample_uid=None, location=None, operator=None,
                  description=None, sub_experiment=None, directory=None):
         """
         Init function. Meta data as mandatory arguments.
         """
-        if(not sample and description and directory and sample_uid and location and
-           sample_uid and operator and sub_experiment):
-            raise Exception('Supply sample, sample_uid, location, operator, \
-            description, directory abd sub_experiment')
+        if(not(sample and description and directory and sample_uid and location and
+               sample_uid and operator and sub_experiment and session)):
+            raise Exception('Supply sample, sample_uid, location, operator, ' +
+                            'description, directory abd sub_experiment')
         self.sample = sample
         self.sample_uid = sample_uid
         self.glob_trig = 0
 
         self.savedata = Savedata('/', 'Configuration')
         self.savedata.attrs['sample_name'] = lambda: self.sample
-        self.savedata.attrs['sample_guuid'] = lambda: self.sample_uid
+        self.savedata.attrs['sample_guid'] = lambda: self.sample_uid
         self.savedata.attrs['location'] = location
+        self.savedata.attrs['session'] = session
         self.savedata.attrs['operator_name'] = operator
-        self.savedata.attrs['description'] = description
+        self.savedata.attrs['experiment_description'] = description
         self.savedata.attrs['sub_experiment'] = sub_experiment
         self.savedata.attrs['trigger_id'] = lambda: self.glob_trig
         self.savedata.attrs['internal_trigger_count'] = lambda: self.triggerID
-        self.savedata.attrs['timestamp'] = lambda: time.time()
+        self.savedata.attrs['File creation  time'] = lambda: time.time()
 
         self.directory = directory
         if(not self.directory.endswith('/')):
@@ -187,16 +188,19 @@ class Coolector(object):
         for dev in self._devices:
             glob_trig = dev.get_glob_trigger()
             if(glob_trig):
-                # print('Setting global trigger to ' + str(glob_trig))
+                print('Setting global trigger to ' + str(glob_trig))
+                trigger = glob_trig
                 self.glob_trigger = glob_trig
 
         # Create file, write to it
         fname = '{0}{1:016d}-{2}.h5'.format(self.directory, trigger, self.sample)
         print('Writing to ' + fname)
         with h5py.File(fname, 'w') as h5f:
+            h5f.attrs['write_finished'] = False
             self.savedata.write(h5f)
             for dev in self._devices:
                 dev.write(h5f)
+            h5f.attrs['write_finished'] = True
         # All devices are read out, ready for new data
         self.latest_file_name = fname
         for dev in self._devices:
@@ -258,7 +262,7 @@ class Cool_device(object):
     potentially_desynced = False  # Did we recieve seceral triggers before writing finished?
 
     data = None
-    timestamp = 0
+    timestamp = False
     triggercount = 0
 
     def __init__(self, port, pathname, dev_type, callback_pvname):
@@ -269,7 +273,10 @@ class Cool_device(object):
         self.dev_type = dev_type  # Descriptor for the device.
 
         self.savedata = Savedata(pathname, dev_type)
-        self.savedata.attrs['timestamp'] = lambda: self.timestamp
+        if self.timestamp:
+            self.savedata.attrs['Capture time'] = lambda: self.timestamp
+        else:
+            self.savedata.attrs['Capture time'] = lambda: time.time()
         self.savedata.attrs['trigger_count'] = lambda: self.triggercount
         self.savedata.attrs['Potentially desynced'] = lambda: self.potentially_desynced
 
@@ -308,7 +315,7 @@ class Cool_device(object):
         self.triggercount += 1
         print('Getting data to callback! ' + self.dev_type)
         if(not self.is_ready):
-            # print('Got data from ' + self.dev_type + ', aka: ' + str(pvn))
+            print('Got data from ' + self.dev_type + ', aka: ' + str(pvn))
             self.data = value
             self.timestamp = timestamp
         else:
@@ -353,7 +360,7 @@ class Cool_device(object):
             self.savedata.attrs[prefix + pv] = lambda: epics.caget(prefix + pv)
         for pv in pvs:
             print(self.savedata.attrs[prefix + pv]())
-        
+
 
 class Manta_cam(Cool_device):
     """
@@ -387,7 +394,7 @@ class Manta_cam(Cool_device):
         return(self.data.reshape(epics.caget(self.port + ':det1:SizeY_RBV'),
                                  epics.caget(self.port + ':det1:SizeX_RBV')))
 
-    def __init__(self, port,
+    def __init__(self, port, lens_id, focal_length, f_number,
                  sw_trig=False,
                  exposure=None,
                  gain=None,
@@ -399,7 +406,7 @@ class Manta_cam(Cool_device):
         super().__init__(port,
                          'data/images/' + port + '/',
                          'Manta camera',
-                         self.port + ':image1:ArrayData')
+                         port + ':image1:ArrayData')
         self.exposure_min = exposure_min
         self.exposure_max = exposure_max
 
@@ -431,8 +438,10 @@ class Manta_cam(Cool_device):
         # Setting up data saving
         # Metadata that will be dumped to device
         sda = self.savedata.attrs
+        sda['lens_id'] = lens_id
+        sda['f_number'] = f_number
+        sda['focal_length'] = focal_length
         sda[port + ':det1:SizeX_RBV'] = lambda: epics.caget(port + ':det1:SizeX_RBV')
-
         sda[port + ':det1:SizeY_RBV'] = lambda: epics.caget(port + ':det1:SizeY_RBV')
         sda[port + ':det1:Manufacturer_RBV'] = lambda: epics.caget(port + ':det1:Manufacturer_RBV')
         sda[port + ':det1:Model_RBV'] = lambda: epics.caget(port + ':det1:Model_RBV')
@@ -555,7 +564,7 @@ class Thorlabs_spectrometer(Cool_device):
         y_data.attrs['unit'] = 'Counts'
         self.savedata.add_dataset(y_data)
 
-        pv3 = self.port + ':det1:TlAmplitudeData_RBV'
+        pv3 = port + ':det1:TlAmplitudeData_RBV'
         scale_data = Dataset('y_scale', lambda: epics.caget(pv3))
         scale_data.attrs['pvname'] = pv3
         scale_data.attrs['label'] = 'Correction'
@@ -572,11 +581,12 @@ class PicoscopePython(Cool_device):
 
     def get_glob_trigger(self):
         # Get trigger number for last caught trigger
+        print('Picoscope trigger count!')
         return(self.triggercount)
-
+            
     def __init__(self, voltage_range=5, sampling_interval=1e-6,
                  capture_duration=0.66, trig_per_min=30):
-        super().__init__('ps4264', 'data/wavefront/ps4264py/', self.dev_type, None)
+        super().__init__('ps4264', 'data/oscope/ps4264py/', self.dev_type, None)
         self._ps = ps4262(VRange=voltage_range, requestedSamplingInterval=sampling_interval,
                           tCapture=capture_duration, triggersPerMinute=trig_per_min)
         # Configuring data for saving
@@ -609,7 +619,6 @@ class PicoscopePython(Cool_device):
         """Should set _ps.data to None"""
         self.is_ready = False
         self._ps.data.clear()
-        pass
 
     def sampling(self, sampling_interval, duration):
         """ Hor long, and at what frequency, will the recorded waveforms be? """
@@ -621,9 +630,9 @@ class PicoscopePython(Cool_device):
         self._ps.setFGrn(triggersPerMinute=tpm)
 
     def hw_trigger(self):
-        print('PS will send it!')
+        print('PS will trigger!')
         self._ps.setFGen(triggersPerMinute=-1)
-        time.sleep(0.05)  # Should not ask for triggers to fast
+        time.sleep(.05)  # Should not ask for triggers to fast
         return(True)
 
 
@@ -697,7 +706,6 @@ class SuperCool(Cool_device):
         super().write(h5g)
 
     def is_ready_p(self):
-        self.timestamp = time.time()
         return(True)
 
 
@@ -743,7 +751,7 @@ class PM100(Cool_device):
                          None)
         self.port = port
         self.pm_pv = self.port + ':MEAS:POW'
-        
+
         # Saving data
         x_data = Dataset('x_values', lambda: self.times)
         x_data.attrs['label'] = 'Measurement time'
