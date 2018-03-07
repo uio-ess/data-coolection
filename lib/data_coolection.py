@@ -399,7 +399,8 @@ class Manta_cam(Cool_device):
                  exposure=None,
                  gain=None,
                  exposure_min=0.0003,
-                 exposure_max=0.1):
+                 exposure_max=0.1,
+                 photons_per_count=False):
         """
         Initialize a manta camera
         """
@@ -441,6 +442,7 @@ class Manta_cam(Cool_device):
         sda['lens_id'] = lens_id
         sda['f_number'] = f_number
         sda['focal_length'] = focal_length
+        sda['photons_per_count'] = photons_per_count
         sda[port + ':det1:SizeX_RBV'] = lambda: epics.caget(port + ':det1:SizeX_RBV')
         sda[port + ':det1:SizeY_RBV'] = lambda: epics.caget(port + ':det1:SizeY_RBV')
         sda[port + ':det1:Manufacturer_RBV'] = lambda: epics.caget(port + ':det1:Manufacturer_RBV')
