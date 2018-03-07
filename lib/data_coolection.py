@@ -262,7 +262,6 @@ class Cool_device(object):
     data = None
     timestamp = False
     triggercount = 0
-    capture_time = 0
 
     def __init__(self, port, pathname, dev_type, callback_pvname):
         self.connected_pvs = []
@@ -278,7 +277,7 @@ class Cool_device(object):
             self.savedata.attrs['timestamp'] = lambda: time.time()
         self.savedata.attrs['trigger_count'] = lambda: self.triggercount
         self.savedata.attrs['Potentially desynced'] = lambda: self.potentially_desynced
-        self.savedata.attrs['Capture Time'] = self.capture_time
+        self.savedata.attrs['Capture Time'] = 0
 
     def get_glob_trigger(self):
         return(None)
@@ -438,8 +437,8 @@ class Manta_cam(Cool_device):
 
         # Setting up data saving
         # Metadata that will be dumped to device
-        self.capture_time = lambda: epics.caget(port + ':det1:AcquireTime_RBV')
         sda = self.savedata.attrs
+        sda['Capture Time'] = lambda: epics.caget(port + ':det1:AcquireTime_RBV')
         sda['lens_id'] = lens_id
         sda['f_number'] = f_number
         sda['focal_length'] = focal_length
@@ -547,8 +546,8 @@ class Thorlabs_spectrometer(Cool_device):
         if(exposure):
             self.set_exposure(exposure)
 
-        self.capture_time = lambda: epics.caget(port + ':det1:AcquireTime_RBV')
         sda = self.savedata.attrs
+        sda['Capture Time'] = lambda: epics.caget(port + ':det1:AcquireTime_RBV')
         # sda[port + ':det1:AcquireTime_RBV'] = lambda: epics.caget(port + ':det1:AcquireTime_RBV')
         sda[port + ':det1:NumImagesCounter_RBV'] = lambda: epics.caget(port + ':det1:NumImagesCounter_RBV')
         sda[port + ':det1:Model_RBV'] = epics.caget(self.port + ':det1:Model_RBV')
@@ -753,6 +752,7 @@ class PM100(Cool_device):
         self.capture_time = 10
         self.port = port
         self.pm_pv = self.port + ':MEAS:POW'
+        self.savedata.attrs['Capture Time'] = self.capture_time
 
         # Saving data
         x_data = Dataset('x_values', lambda: self.times)
