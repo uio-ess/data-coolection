@@ -241,15 +241,13 @@ class Coolector(object):
                 print(time.time())
                 print("Got one! " + str(trig))
 
-    def stage_scan_n_triggers(self, n, cool_stage, auto_exposure=False):
-        for sample, position in cool_stage.sample_dict.items():
-            self.sample = sample
-            self.attrs['sample_name'] = sample
-            cool_stage.move_stage(sample)
+    def stage_scan_n_triggers(self, n, sample_dict, auto_exposure=False):
+        for sample, position in sample_dict.items():
+            self.change_sample(sample, 'NA')
             # Auto exposure
-            for dev in self._devices:
-                if auto_exposure:
-                    dev.auto_exposure()
+            if auto_exposure:
+                for dev in self._devices:
+                    dev.auto_exposure(self.hw_trigger)
             # Get triggers
             self.wait_for_n_triggers(n)
 
@@ -264,6 +262,7 @@ class Cool_device(object):
     data = None
     timestamp = False
     triggercount = 0
+    capture_time = 0
 
     def __init__(self, port, pathname, dev_type, callback_pvname):
         self.connected_pvs = []
@@ -274,11 +273,12 @@ class Cool_device(object):
 
         self.savedata = Savedata(pathname, dev_type)
         if self.timestamp:
-            self.savedata.attrs['Capture time'] = lambda: self.timestamp
+            self.savedata.attrs['timestamp'] = lambda: self.timestamp
         else:
-            self.savedata.attrs['Capture time'] = lambda: time.time()
+            self.savedata.attrs['timestamp'] = lambda: time.time()
         self.savedata.attrs['trigger_count'] = lambda: self.triggercount
         self.savedata.attrs['Potentially desynced'] = lambda: self.potentially_desynced
+        self.savedata.attrs['Capture Time'] = self.capture_time
 
     def get_glob_trigger(self):
         return(None)
@@ -302,7 +302,7 @@ class Cool_device(object):
             pv.disconnect()
         self.connected_pvs = []
 
-    def auto_exposure(self):
+    def auto_exposure(self, trigger_fun):
         """Do auto exposure. Trigger fun should give a single trigger working with
         the configured device."""
         pass
@@ -313,9 +313,9 @@ class Cool_device(object):
         This is intended as a callback funtion for a EPICS pv
         """
         self.triggercount += 1
-        print('Getting data to callback! ' + self.dev_type)
+        # print('Getting data to callback! ' + self.dev_type)
         if(not self.is_ready):
-            print('Got data from ' + self.dev_type + ', aka: ' + str(pvn))
+            # print('Got data from ' + self.dev_type + ', aka: ' + str(pvn))
             self.data = value
             self.timestamp = timestamp
         else:
@@ -438,6 +438,7 @@ class Manta_cam(Cool_device):
 
         # Setting up data saving
         # Metadata that will be dumped to device
+        self.capture_time = lambda: epics.caget(port + ':det1:AcquireTime_RBV')
         sda = self.savedata.attrs
         sda['lens_id'] = lens_id
         sda['f_number'] = f_number
@@ -461,7 +462,7 @@ class Manta_cam(Cool_device):
         ds.attrs['y-units'] = 'Pixels'
         self.savedata.add_dataset(ds)
 
-    def auto_exposure(self):
+    def auto_exposure(self, trigger_fun):
         """ Auto exposure:
         - Set camera to single exposure modde
         - Find the correct exposure
@@ -470,6 +471,7 @@ class Manta_cam(Cool_device):
         print('Camera auto exposure!')
         self.connect()
         while(True):
+            trigger_fun()
             while(not self.is_ready_p()):
                 time.sleep(0.1)
             exp = epics.caget(self.port + ':det1:AcquireTime_RBV')
@@ -545,8 +547,9 @@ class Thorlabs_spectrometer(Cool_device):
         if(exposure):
             self.set_exposure(exposure)
 
+        self.capture_time = lambda: epics.caget(port + ':det1:AcquireTime_RBV')
         sda = self.savedata.attrs
-        sda[port + ':det1:AcquireTime_RBV'] = lambda: epics.caget(port + ':det1:AcquireTime_RBV')
+        # sda[port + ':det1:AcquireTime_RBV'] = lambda: epics.caget(port + ':det1:AcquireTime_RBV')
         sda[port + ':det1:NumImagesCounter_RBV'] = lambda: epics.caget(port + ':det1:NumImagesCounter_RBV')
         sda[port + ':det1:Model_RBV'] = epics.caget(self.port + ':det1:Model_RBV')
         sda[port + ':det1:Manufacturer_RBV'] = epics.caget(port + ':det1:Manufacturer_RBV')
@@ -650,10 +653,12 @@ class LinearStage(Cool_device):
         # self.pos = moveStage.get_position()
         moveStage.set_power_off_delay(0)
         self.sample_dict = {}
+        self.sample_name = ''
         # Save data
-        self.savedata.attrs['Samples'] = lambda: list(self.sample_dict.keys())
+        self.savedata.attrs['Samples'] = lambda: [x.encode('utf8') for x in list(self.sample_dict.keys())]
         self.savedata.attrs['Positions'] = lambda: list(self.sample_dict.values())
         self.savedata.attrs['current_position'] = lambda: moveStage.get_position()
+        self.savedata.attrs['current_sample'] = lambda: self.sample_name
 
     def add_sample(self, name, position):
         self.sample_dict[name] = position
@@ -664,12 +669,6 @@ class LinearStage(Cool_device):
         moveStage.move_to(self.pos)
         time.sleep(0.1)
         return(True)
-
-    def write_datasets(self, h5g):
-        h5g.attrs['Current_position'] = self.pos
-        h5g.attrs['Current_sample'] = self.sample_name
-        for sample, pos in self.sample_dict.items():
-            h5g.attrs[sample] = pos
 
     def is_ready_p(self):
         return(True)
@@ -693,14 +692,14 @@ class SuperCool(Cool_device):
         epics.caput('LT59:Send', 1)
 
         # Set up data saving
-        self.pv_to_attribute('',
-                             'LT59:Temp1Mode',
-                             'LT59:Temp1CoeffA_RBV',
-                             'LT59:Temp1CoeffB_RBV',
-                             'LT59:Temp1CoeffC_RBV',
-                             'LT59:Mode_RBV',
-                             'LT59:Temp1_RBV',
-                             'LT59:StartStop_RBV')
+        sda = self.savedata.attrs
+        sda['LT59:Temp1Mode'] = lambda: epics.caget('LT59:Temp1Mode')
+        sda['LT59:Temp1CoeffA_RBV'] = lambda: epics.caget('LT59:Temp1Mode')
+        sda['LT59:Temp1CoeffB_RBV'] = lambda: epics.caget('LT59:Temp1CoeffB_RBV')
+        sda['LT59:Temp1CoeffC_RBV'] = lambda: epics.caget('LT59:Temp1CoeffC_RBV')
+        sda['LT59:Mode_RBV'] = lambda: epics.caget('LT59:Mode_RBV')
+        sda['LT59:Temp1_RBV'] = lambda: epics.caget('LT59:Temp1_RBV')
+        sda['LT59:StartStop_RBV'] = lambda: epics.caget('LT59:StartStop_RBV')
 
     def write(self, h5g):
         epics.caput('LT59:Retrieve', 1)
@@ -732,7 +731,7 @@ class PM100(Cool_device):
             lambda pvname=None, value=None, char_value=None, **fw:
             pmvals.append((value, time.time())))
 
-        time.sleep(10)
+        time.sleep(self.capture_time)
         pv.disconnect()
         epics.caput(self.port + ':MEAS:POW.SCAN', scan_mode)
         self.array_data = [a[0] for a in pmvals]
@@ -751,6 +750,7 @@ class PM100(Cool_device):
                          'data/powermeter/' + self.port + '/',
                          self.dev_type,
                          None)
+        self.capture_time = 10
         self.port = port
         self.pm_pv = self.port + ':MEAS:POW'
 
