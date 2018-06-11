@@ -5,6 +5,7 @@ import time
 import scipy.ndimage
 import moveStage
 import numbers
+import subprocess
 from ps4262 import ps4262
 
 
@@ -117,7 +118,7 @@ class Coolector(object):
             self.sample_uid = sample_uid
         else:
             print('Do not know how to change samples, add a sample mover')
-        
+
     def check_if_ready(self):
         """
         Are all devices ready for ready out?
@@ -327,7 +328,7 @@ class Cool_device(object):
         pass
 
     def hw_trigger(self):
-        """ Pass a SW trigger to the device """
+        """ Pass a HW trigger to the device """
         pass
 
     def is_ready_p(self):
@@ -709,6 +710,45 @@ class SuperCool(Cool_device):
         return(True)
 
 
+class ECatEL3318(Cool_device):
+    dev_type = 'm-ethercat with EL3318'
+
+    def get_temp(self, channel, position):
+        output = subprocess.check_output(['/home/dev/git/m-ethercat/ethercat-1.5.2/tool/ethercat',
+                                          'upload',
+                                          '-p{:d}'.format(position),
+                                          '--type',
+                                          'int16',
+                                          '0x60{:d}0'.format(channel - 1),
+                                          '0x11'])
+        return(int(output.split()[1])/10.0)
+
+    def __init__(self, position):
+        self.port = 'ECAT'
+        super().__init__('ECAT', 'data/temperature/ECAT/', self.dev_type, None)
+        self.triggercount = 0
+
+        self.sample_dict = {}
+        self.sample_name = ''
+        self.channel = 0
+
+        sda = self.savedata.attrs
+        sda['slave_position'] = position
+        sda['channel'] = lambda: self.channel
+        sda['temperature'] = lambda: self.get_temp(self.channel, position)
+
+    def add_sample(self, name, channel):
+        self.sample_dict[name] = channel
+
+    def move_to_sample(self, sample):
+        self.channel = self.sample_dict[sample]
+        self.sample_name = sample
+        return(True)
+
+    def is_ready_p(self):
+        return(True)
+
+
 class PM100(Cool_device):
     """
     Thorlabs PM100USB
@@ -746,7 +786,7 @@ class PM100(Cool_device):
     def __init__(self, port, sw_trig=False):
         """ Initialize pm100 """
         super().__init__(port,
-                         'data/powermeter/' + self.port + '/',
+                         'data/powermeter/' + port + '/',
                          self.dev_type,
                          None)
         self.capture_time = 10
