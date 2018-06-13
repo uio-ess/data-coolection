@@ -6,6 +6,7 @@ import scipy.ndimage
 import moveStage
 import numbers
 import subprocess
+import collections
 from ps4262 import ps4262
 
 
@@ -80,7 +81,7 @@ class Coolector(object):
     latest_file_name = None
 
     def __init__(self, session=None, sample=None, sample_uid=None, location=None, operator=None,
-                 description=None, sub_experiment=None, directory=None):
+                 description=None, sub_experiment=None, nominal_beam_current=0.0, directory=None):
         """
         Init function. Meta data as mandatory arguments.
         """
@@ -100,8 +101,9 @@ class Coolector(object):
         self.savedata.attrs['operator_name'] = operator
         self.savedata.attrs['experiment_description'] = description
         self.savedata.attrs['sub_experiment'] = sub_experiment
+        self.savedata.attrs['nominal_beam_current'] = nominal_beam_current
         self.savedata.attrs['trigger_id'] = lambda: self.glob_trig
-        self.savedata.attrs['internal_trigger_count'] = lambda: self.triggerID
+        self.savedata.attrs['internal_trigger_count_debug'] = lambda: self.triggerID
         self.savedata.attrs['File creation  time'] = lambda: time.time()
 
         self.directory = directory
@@ -153,7 +155,8 @@ class Coolector(object):
             if(time.time() - tzero > timeout):
                 for dev in self._devices:
                     print(dev.dev_type + ' is ready: ' + str(dev.is_ready_p()))
-                print('Timed out while waiting for trigger!')
+                print('Timed out while waiting for data!')
+                raise RuntimeError('Timed out while waiting for data!')
                 break
             time.sleep(self.pause)
         if(got_data_p):
@@ -186,15 +189,25 @@ class Coolector(object):
         # Get global trigger from device, or use internal counter
         self.triggerID += 1
         trigger = self.triggerID
+        pot_desync = False
+        for dev in self._devices:
+            if dev.potentially_desynced:
+                #raise RuntimeError('Potentially desynced data!')
+                print('writing desynced event!')
+                pot_desync = True
+
         for dev in self._devices:
             glob_trig = dev.get_glob_trigger()
             if(glob_trig):
                 print('Setting global trigger to ' + str(glob_trig))
                 trigger = glob_trig
-                self.glob_trigger = glob_trig
+                self.glob_trig = glob_trig
 
         # Create file, write to it
-        fname = '{0}{1:016d}-{2}.h5'.format(self.directory, trigger, self.sample)
+        if pot_desync:
+            fname = '{0}{1:016d}-{2}.h5'.format('/tmp/', trigger, 'desynced')
+        else:
+            fname = '{0}{1:016d}-{2}.h5'.format(self.directory, trigger, self.sample)
         print('Writing to ' + fname)
         with h5py.File(fname, 'w') as h5f:
             h5f.attrs['write_finished'] = False
@@ -232,6 +245,8 @@ class Coolector(object):
     # Scans
     def wait_for_n_triggers(self, n, SW_trigger=False):
         with self as c:
+            for dev in self._devices:
+                dev.clear()
             for trig in range(n):
                 if(SW_trigger):
                     self.sw_trigger()
@@ -247,6 +262,8 @@ class Coolector(object):
             self.change_sample(sample, 'NA')
             # Auto exposure
             if auto_exposure:
+                for dev in self._devices:
+                    dev.auto_exposure(self.hw_trigger)
                 for dev in self._devices:
                     dev.auto_exposure(self.hw_trigger)
             # Get triggers
@@ -276,9 +293,9 @@ class Cool_device(object):
             self.savedata.attrs['timestamp'] = lambda: self.timestamp
         else:
             self.savedata.attrs['timestamp'] = lambda: time.time()
-        self.savedata.attrs['trigger_count'] = lambda: self.triggercount
+        self.savedata.attrs['trigger_count_debug'] = lambda: self.triggercount
         self.savedata.attrs['Potentially desynced'] = lambda: self.potentially_desynced
-        self.savedata.attrs['Capture Time'] = 0
+        self.savedata.attrs['acquire_duration'] = 0
 
     def get_glob_trigger(self):
         return(None)
@@ -339,6 +356,7 @@ class Cool_device(object):
 
     def clear(self):
         """ Clear data from device. For EPICS devices, sinply set is_ready to false. """
+        print('clearing ' + str(self.dev_type))
         self.is_ready = False
         self.potentially_desynced = False
 
@@ -439,7 +457,7 @@ class Manta_cam(Cool_device):
         # Setting up data saving
         # Metadata that will be dumped to device
         sda = self.savedata.attrs
-        sda['Capture Time'] = lambda: epics.caget(port + ':det1:AcquireTime_RBV')
+        sda['acquire_duration'] = lambda: epics.caget(port + ':det1:AcquireTime_RBV')
         sda['lens_id'] = lens_id
         sda['f_number'] = f_number
         sda['focal_length'] = focal_length
@@ -479,9 +497,11 @@ class Manta_cam(Cool_device):
             data = data.reshape(epics.caget(self.port + ':det1:SizeY_RBV'),
                                 epics.caget(self.port + ':det1:SizeX_RBV'))
             sm = scipy.ndimage.filters.median_filter(data, 9).max()
+            print('Over exposed is ' + str(sm))
+            print('Max smoothed is ' + str(sm))
             max_image = 2**12 - 1
             exp = epics.caget(self.port + ':det1:AcquireTime_RBV')
-            autoset = exp * (max_image * 0.5)/sm
+            autoset = exp * (max_image * 0.45)/sm
             self.set_exposure(autoset)
             self.clear()
             if(autoset > self.exposure_max):
@@ -493,6 +513,7 @@ class Manta_cam(Cool_device):
             if(autoset/exp > (1/1.5) and autoset/exp < 1.5):
                 print('Exposure set to ' + str(autoset))
                 break
+        print('Auto exposure done.')
         self.disconnect()
         return()
 
@@ -548,7 +569,7 @@ class Thorlabs_spectrometer(Cool_device):
             self.set_exposure(exposure)
 
         sda = self.savedata.attrs
-        sda['Capture Time'] = lambda: epics.caget(port + ':det1:AcquireTime_RBV')
+        sda['acquire_duration'] = lambda: epics.caget(port + ':det1:AcquireTime_RBV')
         # sda[port + ':det1:AcquireTime_RBV'] = lambda: epics.caget(port + ':det1:AcquireTime_RBV')
         sda[port + ':det1:NumImagesCounter_RBV'] = lambda: epics.caget(port + ':det1:NumImagesCounter_RBV')
         sda[port + ':det1:Model_RBV'] = epics.caget(self.port + ':det1:Model_RBV')
@@ -576,6 +597,15 @@ class Thorlabs_spectrometer(Cool_device):
         scale_data.attrs['unit'] = 'Scale factor'
         self.savedata.add_dataset(scale_data)
 
+    def auto_exposure(self, trigger_fun):
+        """ Auto exposure:
+        Set to 5x camera exposure
+        """
+        print('CSS auto exposure')
+        cam_exp = epics.caget('CAM1:det1:AcquireTime_RBV')
+        print('Set exposure to ' + str(cam_exp * 5))
+        self.set_exposure(cam_exp * 5)
+
 
 class PicoscopePython(Cool_device):
     """
@@ -586,12 +616,16 @@ class PicoscopePython(Cool_device):
 
     def get_glob_trigger(self):
         # Get trigger number for last caught trigger
-        print('Picoscope trigger count!')
         return(self.triggercount)
-            
+
+    def set_exposure(self, exposure):
+        self._ps.setTimeBase(requestedSamplingInterval=self.samplingInterval,
+                             tCapture=exposure)
+
     def __init__(self, voltage_range=5, sampling_interval=1e-6,
                  capture_duration=0.66, trig_per_min=30):
         super().__init__('ps4264', 'data/oscope/ps4264py/', self.dev_type, None)
+        self.samplingInterval = sampling_interval
         self._ps = ps4262(VRange=voltage_range, requestedSamplingInterval=sampling_interval,
                           tCapture=capture_duration, triggersPerMinute=trig_per_min)
         # Configuring data for saving
@@ -599,12 +633,18 @@ class PicoscopePython(Cool_device):
         current.attrs['label'] = 'Current'
         current.attrs['unit'] = 'A'
         self.savedata.add_dataset(current)
-        # Lambdas kalled during write(), queue should be 0
+        self.currentds = current
+        self.acquire_duration = 0
+        # Lambdas called during write(), queue should be 0
         self.potentially_desynced = len(self._ps.data) > 0
         self.savedata.attrs['Queue length'] = lambda: len(self._ps.data)
-        self.metadata = {}
+        self.savedata.attrs['acquire_duration'] = lambda: self.acquire_duration
+        self.metadata = None
 
     def write(self, h5f):
+        for key, value in self.data.items():
+            if key != 'current':
+                self.currentds.attrs[key] = value
         super().write(h5f)
         self.savedata.write_additional_meta(h5f, self.metadata)
 
@@ -616,6 +656,7 @@ class PicoscopePython(Cool_device):
             self.data = self._ps.data.popleft()
             self.timestamp = self.data['timestamp']
             self.triggercount = self._ps.edgesCaught
+            self.acquire_duration = self.data['t_end'] - self.data['t0']
             self.is_ready = True
             self.metadata = self._ps.getMetadata()
         return(self.is_ready)
@@ -640,6 +681,16 @@ class PicoscopePython(Cool_device):
         time.sleep(.05)  # Should not ask for triggers to fast
         return(True)
 
+    def auto_exposure(self, trigger_fun):
+        """ Auto exposure:
+        Set to max of camera exposure, spectrometer exposure
+        """
+        print('Picoscope exposure')
+        cam_exp = epics.caget('CAM1:det1:AcquireTime_RBV')
+        css_exp = epics.caget('CCS1:det1:AcquireTime_RBV')
+        print('Set exposure to ' + str(1.25 * max(cam_exp, css_exp)))
+        self.set_exposure(1.25 * max(cam_exp, css_exp))
+
 
 class LinearStage(Cool_device):
     """ Code for setting up, reading position and moving the linear stage """
@@ -652,7 +703,7 @@ class LinearStage(Cool_device):
                          None)
         # self.pos = moveStage.get_position()
         moveStage.set_power_off_delay(0)
-        self.sample_dict = {}
+        self.sample_dict = collections.OrderedDict()
         self.sample_name = ''
         # Save data
         self.savedata.attrs['Samples'] = lambda: [x.encode('utf8') for x in list(self.sample_dict.keys())]
@@ -792,7 +843,7 @@ class PM100(Cool_device):
         self.capture_time = 10
         self.port = port
         self.pm_pv = self.port + ':MEAS:POW'
-        self.savedata.attrs['Capture Time'] = self.capture_time
+        self.savedata.attrs['acquire_duration'] = self.capture_time
 
         # Saving data
         x_data = Dataset('x_values', lambda: self.times)

@@ -15,7 +15,7 @@ c = cool.Coolector(sample='Dummy',
                    directory='/tmp/')
 # Add devices
 cam = cool.Manta_cam('CAM1', "Nikkor 600, f4", "600", "8", sw_trig=True,
-                     exposure=0.20, gain=0, exposure_max=0.4)
+                     exposure=.5, gain=0, exposure_max=0.4)
 c.add_device(cam)
 
 plt.ion()
