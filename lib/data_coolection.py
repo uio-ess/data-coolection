@@ -88,7 +88,7 @@ class Coolector(object):
         if(not(sample and description and directory and sample_uid and location and
                sample_uid and operator and sub_experiment and session)):
             raise Exception('Supply sample, sample_uid, location, operator, ' +
-                            'description, directory abd sub_experiment')
+                            'description, directory and sub_experiment')
         self.sample = sample
         self.sample_uid = sample_uid
         self.glob_trig = 0
@@ -104,7 +104,7 @@ class Coolector(object):
         self.savedata.attrs['nominal_beam_current'] = nominal_beam_current
         self.savedata.attrs['trigger_id'] = lambda: self.glob_trig
         self.savedata.attrs['internal_trigger_count_debug'] = lambda: self.triggerID
-        self.savedata.attrs['File creation  time'] = lambda: time.time()
+        self.savedata.attrs['timestamp'] = lambda: time.time()
 
         self.directory = directory
         if(not self.directory.endswith('/')):
@@ -243,7 +243,7 @@ class Coolector(object):
             dev.disconnect()
 
     # Scans
-    def wait_for_n_triggers(self, n, SW_trigger=False):
+    def wait_for_n_triggers(self, n, SW_trigger=False, pause=False):
         with self as c:
             for dev in self._devices:
                 dev.clear()
@@ -256,6 +256,8 @@ class Coolector(object):
                 c.wait_for_data()
                 print(time.time())
                 print("Got one! " + str(trig))
+                if pause:
+                    time.sleep(pause)
 
     def stage_scan_n_triggers(self, n, sample_dict, auto_exposure=False):
         for sample, position in sample_dict.items():
@@ -268,6 +270,17 @@ class Coolector(object):
                     dev.auto_exposure(self.hw_trigger)
             # Get triggers
             self.wait_for_n_triggers(n)
+
+    def heat_scan_sample(self, sample, auto_exposure=False, pause=5):
+        self.change_sample(sample, 'NA')
+        # Auto exposure
+        if auto_exposure:
+            for dev in self._devices:
+                dev.auto_exposure(self.hw_trigger)
+            for dev in self._devices:
+                dev.auto_exposure(self.hw_trigger)
+        # Get triggers
+        self.wait_for_n_triggers(99999, SW_trigger=False, pause=pause)
 
 
 class Cool_device(object):
@@ -622,16 +635,16 @@ class PicoscopePython(Cool_device):
         self._ps.setTimeBase(requestedSamplingInterval=self.samplingInterval,
                              tCapture=exposure)
 
-    def __init__(self, voltage_range=5, sampling_interval=1e-6,
+    def __init__(self, voltage_range=5, sampling_interval=2e-7,
                  capture_duration=0.66, trig_per_min=30):
         super().__init__('ps4264', 'data/oscope/ps4264py/', self.dev_type, None)
         self.samplingInterval = sampling_interval
         self._ps = ps4262(VRange=voltage_range, requestedSamplingInterval=sampling_interval,
                           tCapture=capture_duration, triggersPerMinute=trig_per_min)
         # Configuring data for saving
-        current = Dataset('y_data', lambda: self.data['current'])
-        current.attrs['label'] = 'Current'
-        current.attrs['unit'] = 'A'
+        current = Dataset('y_data', lambda: self.data['raw_data'])
+        # current.attrs['label'] = 'raw_data'
+        # current.attrs['unit'] = 'counts'
         self.savedata.add_dataset(current)
         self.currentds = current
         self.acquire_duration = 0
@@ -643,16 +656,18 @@ class PicoscopePython(Cool_device):
 
     def write(self, h5f):
         for key, value in self.data.items():
-            if key != 'current':
+            if key != 'raw_data':
                 self.currentds.attrs[key] = value
         super().write(h5f)
         self.savedata.write_additional_meta(h5f, self.metadata)
 
     def is_ready_p(self):
         """If we do not have fresh data, wait for it. If we do, we are ready."""
+        # print('In picoscope is ready!!')
         if(self.is_ready):
             return(True)
         if(len(self._ps.data) > 0):
+            print('Got data!!')
             self.data = self._ps.data.popleft()
             self.timestamp = self.data['timestamp']
             self.triggercount = self._ps.edgesCaught
