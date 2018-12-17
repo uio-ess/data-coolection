@@ -3,11 +3,13 @@ import epics
 import threading
 import time
 import scipy.ndimage
+import scipy.signal
 import moveStage
 import numbers
 import subprocess
 import collections
 from ps4262 import ps4262
+from ISSI_lens_controller import EF_Controller
 
 
 def hush():
@@ -192,7 +194,7 @@ class Coolector(object):
         pot_desync = False
         for dev in self._devices:
             if dev.potentially_desynced:
-                #raise RuntimeError('Potentially desynced data!')
+                # raise RuntimeError('Potentially desynced data!')
                 print('writing desynced event!')
                 pot_desync = True
 
@@ -246,6 +248,9 @@ class Coolector(object):
     def wait_for_n_triggers(self, n, SW_trigger=False, pause=False):
         with self as c:
             for dev in self._devices:
+                dev.check_exposure()
+            time.sleep(2.0)
+            for dev in self._devices:
                 dev.clear()
             for trig in range(n):
                 if(SW_trigger):
@@ -259,17 +264,19 @@ class Coolector(object):
                 if pause:
                     time.sleep(pause)
 
-    def stage_scan_n_triggers(self, n, sample_dict, auto_exposure=False):
+    def stage_scan_n_triggers(self, n, sample_dict, auto_exposure=False, skip_dark_nb=False):
         for sample, position in sample_dict.items():
             self.change_sample(sample, 'NA')
-            # Auto exposure
-            if auto_exposure:
-                for dev in self._devices:
-                    dev.auto_exposure(self.hw_trigger)
-                for dev in self._devices:
-                    dev.auto_exposure(self.hw_trigger)
-            # Get triggers
-            self.wait_for_n_triggers(n)
+            dark_frame = (sample == 'DARK_NOBEAM') or (sample == 'DARK_BEAM')
+            if not(skip_dark_nb and (sample == 'DARK_NOBEAM')):
+                # Auto exposure
+                if auto_exposure and not dark_frame:
+                    for dev in self._devices:
+                        dev.auto_exposure(self.hw_trigger)
+                # Get triggers
+                self.wait_for_n_triggers(n)
+                if sample == 'DARK_NOBEAM':
+                    input('Press Enter to continue')
 
     def heat_scan_sample(self, sample, auto_exposure=False, pause=5):
         self.change_sample(sample, 'NA')
@@ -331,6 +338,9 @@ class Cool_device(object):
         for pv in self.connected_pvs:
             pv.disconnect()
         self.connected_pvs = []
+
+    def check_exposure(self):
+        pass
 
     def auto_exposure(self, trigger_fun):
         """Do auto exposure. Trigger fun should give a single trigger working with
@@ -422,6 +432,8 @@ class Manta_cam(Cool_device):
         time.sleep(0.1)
 
     def get_reshaped_data(self):
+        print('Hello!')
+        print(self.data)
         return(self.data.reshape(epics.caget(self.port + ':det1:SizeY_RBV'),
                                  epics.caget(self.port + ':det1:SizeX_RBV')))
 
@@ -493,6 +505,18 @@ class Manta_cam(Cool_device):
         ds.attrs['y-units'] = 'Pixels'
         self.savedata.add_dataset(ds)
 
+    def enable_lens_controller(self, focus=None, aper=None):
+        self.efc = EF_Controller()
+        sda = self.savedata.attrs
+        sda['lens_controller'] = 'ISSI'
+        sda['lens_id'] = lambda: self.efc.get_lens()
+        sda['f_number'] = lambda: float(self.efc.get_aper())
+        sda['focal_length'] = lambda: self.efc.get_focal_length()
+        if(focus):
+            self.efc.set_focus(focus)
+        if(aper):
+            self.efc.set_aperture(aper)
+
     def auto_exposure(self, trigger_fun):
         """ Auto exposure:
         - Set camera to single exposure modde
@@ -543,11 +567,17 @@ class Thorlabs_spectrometer(Cool_device):
         """
         Set exposure
         """
+        exposure = max(exposure, self.exposure_min)
+        exposure = min(exposure, self.exposure_max)
         print('Setting exposure to: ' + str(exposure))
         epics.caput(self.port + ':det1:AcquireTime', exposure)
         time.sleep(0.1)
 
-    def __init__(self, port, sw_trig=False, exposure=None):
+    def __init__(self, port,
+                 sw_trig=False,
+                 exposure=None,
+                 exposure_min=0.0002,
+                 exposure_max=2):
         """
         Initialize a Thorlabs spectrometer
         """
@@ -555,6 +585,9 @@ class Thorlabs_spectrometer(Cool_device):
                          'data/spectra/' + port + '/',
                          self.dev_type,
                          port + ':trace1:ArrayData')
+    
+        self.exposure_min = exposure_min
+        self.exposure_max = exposure_max
 
         # Initialize device
         for pvname, value in {':det1:TlAcquisitionType': 0,  # 1 is processed, set to 0 for raw
@@ -614,10 +647,37 @@ class Thorlabs_spectrometer(Cool_device):
         """ Auto exposure:
         Set to 5x camera exposure
         """
-        print('CSS auto exposure')
-        cam_exp = epics.caget('CAM1:det1:AcquireTime_RBV')
-        print('Set exposure to ' + str(cam_exp * 5))
-        self.set_exposure(cam_exp * 5)
+        print('CCS exposure!')
+        self.connect()
+        while(True):
+            trigger_fun()
+            while(not self.is_ready_p()):
+                time.sleep(0.1)
+            exp = epics.caget(self.port + ':det1:AcquireTime_RBV')
+            wave = epics.caget(self.port + ':det1:TlWavelengthData_RBV')
+            data = epics.caget(self.port + ':trace1:ArrayData')[0:len(wave)]
+            sm = scipy.signal.medfilt(data, 3).max()
+            max_array = 2**16 - 1
+            exp = epics.caget(self.port + ':det1:AcquireTime_RBV')
+            autoset = exp * (max_array * 0.45)/sm
+            self.set_exposure(autoset)
+            self.clear()
+            if(autoset > self.exposure_max):
+                print('Exposure set to max!')
+                break
+            if(autoset < self.exposure_min):
+                print('Exposure set to min!')
+                break
+            if(autoset/exp > (1/1.5) and autoset/exp < 1.5):
+                print('Exposure set to ' + str(autoset))
+                break
+        print('Auto exposure done.')
+        self.disconnect()
+        return()
+        # print('CSS auto exposure')
+        # cam_exp = epics.caget('CAM1:det1:AcquireTime_RBV')
+        # print('Set exposure to ' + str(cam_exp * 5))
+        # self.set_exposure(cam_exp * 5)
 
 
 class PicoscopePython(Cool_device):
@@ -635,7 +695,7 @@ class PicoscopePython(Cool_device):
         self._ps.setTimeBase(requestedSamplingInterval=self.samplingInterval,
                              tCapture=exposure)
 
-    def __init__(self, voltage_range=5, sampling_interval=2e-7,
+    def __init__(self, voltage_range=1, sampling_interval=2e-7,
                  capture_duration=0.66, trig_per_min=30):
         super().__init__('ps4264', 'data/oscope/ps4264py/', self.dev_type, None)
         self.samplingInterval = sampling_interval
@@ -667,7 +727,7 @@ class PicoscopePython(Cool_device):
         if(self.is_ready):
             return(True)
         if(len(self._ps.data) > 0):
-            print('Got data!!')
+            print('Pico data!!')
             self.data = self._ps.data.popleft()
             self.timestamp = self.data['timestamp']
             self.triggercount = self._ps.edgesCaught
@@ -695,6 +755,18 @@ class PicoscopePython(Cool_device):
         self._ps.setFGen(triggersPerMinute=-1)
         time.sleep(.05)  # Should not ask for triggers to fast
         return(True)
+
+    def check_exposure(self):
+        """
+        See if exposure settings are ok
+        """
+        print("Checking picoscope exposure settings")
+        cam_exp = epics.caget('CAM1:det1:AcquireTime_RBV')
+        css_exp = epics.caget('CCS1:det1:AcquireTime_RBV')
+        ps_exp = self._ps.tCapture
+        if (ps_exp < 1.25 * max(cam_exp, css_exp)):
+            print('Picoscope exposure is shorter than camera or spectrometer exposure')
+            input('Press Enter to continue')
 
     def auto_exposure(self, trigger_fun):
         """ Auto exposure:
@@ -780,14 +852,17 @@ class ECatEL3318(Cool_device):
     dev_type = 'm-ethercat with EL3318'
 
     def get_temp(self, channel, position):
-        output = subprocess.check_output(['/home/dev/git/m-ethercat/ethercat-1.5.2/tool/ethercat',
-                                          'upload',
-                                          '-p{:d}'.format(position),
-                                          '--type',
-                                          'int16',
-                                          '0x60{:d}0'.format(channel - 1),
-                                          '0x11'])
-        return(int(output.split()[1])/10.0)
+        if channel == -1:
+            return(0.0)
+        else:
+            output = subprocess.check_output(['/home/dev/git/m-ethercat/ethercat-1.5.2/tool/ethercat',
+                                              'upload',
+                                              '-p{:d}'.format(position),
+                                              '--type',
+                                              'int16',
+                                              '0x60{:d}0'.format(channel - 1),
+                                              '0x11'])
+            return(int(output.split()[1])/10.0)
 
     def __init__(self, position):
         self.port = 'ECAT'
