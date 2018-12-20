@@ -8,6 +8,7 @@ import moveStage
 import numbers
 import subprocess
 import collections
+import socket
 from ps4262 import ps4262
 from ISSI_lens_controller import EF_Controller
 
@@ -173,14 +174,15 @@ class Coolector(object):
 
     def hw_trigger(self):
         """
-        Send SW trigger to all connected devices
+        Send HW trigger to all connected devices
         """
         triggers = 0
         for dev in self._devices:
             if(dev.hw_trigger()):
                 triggers = triggers + 1
         if triggers == 0:
-            print('Found no devices avble to send a HW trigger')
+            print('Found no devices able to send a HW trigger')
+            print('Send manual one?')
         if triggers > 1:
             print('Several trigger generators attached')
 
@@ -696,7 +698,7 @@ class PicoscopePython(Cool_device):
                              tCapture=exposure)
 
     def __init__(self, voltage_range=1, sampling_interval=2e-7,
-                 capture_duration=0.66, trig_per_min=30):
+                 capture_duration=0.66, trig_per_min=30, send_triggers=False):
         super().__init__('ps4264', 'data/oscope/ps4264py/', self.dev_type, None)
         self.samplingInterval = sampling_interval
         self._ps = ps4262(VRange=voltage_range, requestedSamplingInterval=sampling_interval,
@@ -713,6 +715,7 @@ class PicoscopePython(Cool_device):
         self.savedata.attrs['Queue length'] = lambda: len(self._ps.data)
         self.savedata.attrs['acquire_duration'] = lambda: self.acquire_duration
         self.metadata = None
+        self.send_triggers = send_triggers
 
     def write(self, h5f):
         for key, value in self.data.items():
@@ -751,10 +754,11 @@ class PicoscopePython(Cool_device):
         self._ps.setFGrn(triggersPerMinute=tpm)
 
     def hw_trigger(self):
-        print('PS will trigger!')
-        self._ps.setFGen(triggersPerMinute=-1)
-        time.sleep(.05)  # Should not ask for triggers to fast
-        return(True)
+        if(self.send_triggers):
+            print('PS will trigger!')
+            self._ps.setFGen(triggersPerMinute=-1)
+            time.sleep(.05)  # Should not ask for triggers to fast
+            return(True)
 
     def check_exposure(self):
         """
@@ -885,6 +889,45 @@ class ECatEL3318(Cool_device):
         self.channel = self.sample_dict[sample]
         self.sample_name = sample
         return(True)
+
+    def is_ready_p(self):
+        return(True)
+
+
+class Raspi_trigger(Cool_device):
+    """
+    Raspberry pi trigger on demand over sockets
+    """
+    dev_type = "Raspi trigger"
+
+    def __init__(self, dev_port, ip_addr, ip_port):
+        """ Initialize pm100 """
+        super().__init__(dev_port,
+                         'data/trigger/' + dev_port + '/',
+                         self.dev_type,
+                         None)
+        self.ip_addr = ip_addr
+        self.savedata.attrs['IP_address'] = lambda: self.ip_addr
+        self.ip_port = ip_port
+        self.savedata.attrs['port'] = lambda: self.ip_port
+
+    def get_glob_trigger(self):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.connect((self.ip_addr, self.ip_port))
+            s.sendall(b"getTriggerNo")
+            data, addr = s.recvfrom(1024)
+            return(int(data))
+
+    def hw_trigger(self):
+        print("Raspi will trigger!")
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.connect((self.ip_addr, self.ip_port))
+            s.sendall(b"trigger")
+            data, addr = s.recvfrom(1024)
+            if(data != b"ok"):
+                raise Exception('Did not get ok from raspi trigger')
+            else:
+                return(True)
 
     def is_ready_p(self):
         return(True)

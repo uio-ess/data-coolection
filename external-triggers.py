@@ -21,10 +21,9 @@ cam = cool.Manta_cam('CAM1', 'Dummy', 50, 8.0,
                      gain=0,
                      exposure_min=0.001,
                      exposure_max=1.0)
-
-cam.enable_lens_controller(focus=3390, aper='22')
+# cam.enable_lens_controller(focus=3390, aper='22')
 time.sleep(2)
-cam.efc.set_aperture('22')
+# cam.efc.set_aperture('22')
 cam.savedata.attrs['photons_per_count'] = 5.7817
 cam.savedata.attrs['lens_transmission'] = 0.87
 cam.savedata.attrs['ND filter'] = 1.0
