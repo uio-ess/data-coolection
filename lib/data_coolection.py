@@ -266,6 +266,10 @@ class Coolector(object):
                 if pause:
                     time.sleep(pause)
 
+    def do_auto_exposure(self):
+        for dev in self._devices:
+            dev.auto_exposure(self.hw_trigger)
+
     def stage_scan_n_triggers(self, n, sample_dict, auto_exposure=False, skip_dark_nb=False):
         for sample, position in sample_dict.items():
             self.change_sample(sample, 'NA')
@@ -455,6 +459,7 @@ class Manta_cam(Cool_device):
                          port + ':image1:ArrayData')
         self.exposure_min = exposure_min
         self.exposure_max = exposure_max
+        self.lens_controller = False
 
         # Initialize device
         for pvname, value in {':image1:EnableCallbacks': 1,  # Enable
@@ -508,16 +513,28 @@ class Manta_cam(Cool_device):
         self.savedata.add_dataset(ds)
 
     def enable_lens_controller(self, focus=None, aper=None):
-        self.efc = EF_Controller()
+        # self.efc = EF_Controller()
+        self.lens_controller=True
+        epics.caput("LENS:ping", 1)
+        time.sleep(1)
         sda = self.savedata.attrs
-        sda['lens_controller'] = 'ISSI'
-        sda['lens_id'] = lambda: self.efc.get_lens()
-        sda['f_number'] = lambda: float(self.efc.get_aper())
-        sda['focal_length'] = lambda: self.efc.get_focal_length()
+        sda['lens_controller'] = 'ISSI_EPICS'
+        sda['lens_id'] = lambda: epics.caget("LENS:lens")
+        sda['f_number'] = lambda: float(epics.caget("LENS:getAper"))
+        sda['focus'] = lambda: float(epics.caget("LENS:getFocus"))
+        sda['focal_length'] = lambda: float(epics.caget("LENS:getFocalLength"))
         if(focus):
             self.efc.set_focus(focus)
         if(aper):
             self.efc.set_aperture(aper)
+    
+    def write(self, h5g):
+        """
+        If lens controller is enabled, it must be pinged before we can read back lens info
+        """
+        if(self.lens_controller): epics.caput('LENS:ping', 1)
+        time.sleep(0.1)
+        super().write(h5g)
 
     def auto_exposure(self, trigger_fun):
         """ Auto exposure:
@@ -526,8 +543,13 @@ class Manta_cam(Cool_device):
         - Set camera back to initial configuration
         """
         print('Camera auto exposure!')
+        exposure_level = 0.5
         self.connect()
+        trigger_fun()
+        time.sleep(0.1)
+        self.set_exposure(0.15)
         while(True):
+            self.clear()
             trigger_fun()
             while(not self.is_ready_p()):
                 time.sleep(0.1)
@@ -540,9 +562,8 @@ class Manta_cam(Cool_device):
             print('Max smoothed is ' + str(sm))
             max_image = 2**12 - 1
             exp = epics.caget(self.port + ':det1:AcquireTime_RBV')
-            autoset = exp * (max_image * 0.45)/sm
+            autoset = exp * (max_image * exposure_level)/sm
             self.set_exposure(autoset)
-            self.clear()
             if(autoset > self.exposure_max):
                 print('Exposure set to max!')
                 break
@@ -647,11 +668,15 @@ class Thorlabs_spectrometer(Cool_device):
 
     def auto_exposure(self, trigger_fun):
         """ Auto exposure:
-        Set to 5x camera exposure
+        
         """
         print('CCS exposure!')
+        exposure_level = 0.6
         self.connect()
+        trigger_fun()
+        time.sleep(0.1)
         while(True):
+            self.clear()
             trigger_fun()
             while(not self.is_ready_p()):
                 time.sleep(0.1)
@@ -661,9 +686,8 @@ class Thorlabs_spectrometer(Cool_device):
             sm = scipy.signal.medfilt(data, 3).max()
             max_array = 2**16 - 1
             exp = epics.caget(self.port + ':det1:AcquireTime_RBV')
-            autoset = exp * (max_array * 0.45)/sm
+            autoset = exp * (max_array * exposure_level)/sm
             self.set_exposure(autoset)
-            self.clear()
             if(autoset > self.exposure_max):
                 print('Exposure set to max!')
                 break
@@ -691,7 +715,10 @@ class PicoscopePython(Cool_device):
 
     def get_glob_trigger(self):
         # Get trigger number for last caught trigger
-        return(self.triggercount)
+        if(self.send_triggers):
+            return(self.triggercount)
+        else:
+            return(False)
 
     def set_exposure(self, exposure):
         self._ps.setTimeBase(requestedSamplingInterval=self.samplingInterval,
@@ -745,7 +772,7 @@ class PicoscopePython(Cool_device):
         self._ps.data.clear()
 
     def sampling(self, sampling_interval, duration):
-        """ Hor long, and at what frequency, will the recorded waveforms be? """
+        """ How long, and at what frequency, will the recorded waveforms be? """
         self._ps.setTimeBase(requestedSamplingInterval=sampling_interval,
                              tCapture=duration)
 
@@ -900,34 +927,21 @@ class Raspi_trigger(Cool_device):
     """
     dev_type = "Raspi trigger"
 
-    def __init__(self, dev_port, ip_addr, ip_port):
+    def __init__(self, dev_port="RPI"):
         """ Initialize pm100 """
         super().__init__(dev_port,
                          'data/trigger/' + dev_port + '/',
                          self.dev_type,
                          None)
-        self.ip_addr = ip_addr
-        self.savedata.attrs['IP_address'] = lambda: self.ip_addr
-        self.ip_port = ip_port
-        self.savedata.attrs['port'] = lambda: self.ip_port
 
     def get_glob_trigger(self):
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.connect((self.ip_addr, self.ip_port))
-            s.sendall(b"getTriggerNo")
-            data, addr = s.recvfrom(1024)
-            return(int(data))
+        return(int(epics.caget("RPI:getTriggerNum")))
+        
 
     def hw_trigger(self):
         print("Raspi will trigger!")
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.connect((self.ip_addr, self.ip_port))
-            s.sendall(b"trigger")
-            data, addr = s.recvfrom(1024)
-            if(data != b"ok"):
-                raise Exception('Did not get ok from raspi trigger')
-            else:
-                return(True)
+        epics.caput("RPI:trigger", 1)
+        return(True)
 
     def is_ready_p(self):
         return(True)
@@ -938,7 +952,7 @@ class PM100(Cool_device):
     Thorlabs PM100USB
     """
     dev_type = 'Thorlabs PM100USB'
-    n_samples = 500
+    n_samples = 10
 
     times = []
 
@@ -977,6 +991,7 @@ class PM100(Cool_device):
         self.port = port
         self.pm_pv = self.port + ':MEAS:POW'
         self.savedata.attrs['acquire_duration'] = self.capture_time
+        self.savedata.attrs['wavelength'] = lambda: epics.caget("PM100:SENS:CORR:WAV_RBV")
 
         # Saving data
         x_data = Dataset('x_values', lambda: self.times)
